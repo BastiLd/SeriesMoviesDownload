@@ -89,6 +89,9 @@ body.dark .hero {
     radial-gradient(120% 130% at 8% 100%, rgba(90,150,160,.20), transparent 50%),
     linear-gradient(118deg, #3a2c40 0%, #322c44 46%, #1f3940 100%);
 }
+.three-bg { position: absolute; inset: 0; z-index: 0; }
+.three-bg canvas { display: block; width: 100% !important; height: 100% !important; }
+.hero-scrim { position: absolute; inset: 0; z-index: 1; pointer-events: none; background: linear-gradient(100deg, rgba(18,14,24,.52) 0%, rgba(18,14,24,.24) 46%, rgba(18,14,24,0) 76%); }
 .hero-inner { position: relative; z-index: 2; max-width: 640px; color: #fff; }
 .kicker { font-weight: 800; letter-spacing: 3px; font-size: 12px; opacity: .9; }
 .hero h1 { font-family: 'Fredoka'; font-weight: 700; font-size: 46px; line-height: 1.04; margin: 12px 0 14px; text-shadow: 0 2px 16px rgba(0,0,0,.22); }

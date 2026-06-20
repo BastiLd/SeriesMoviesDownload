@@ -4,6 +4,7 @@ import {
   LANGUAGES, STATES, QUALITY_MIN, QUALITY_MAX, HDR_STATES, MAXSIZE, REFRESH_OPTS, SERVICES,
   qName, tierOf, isExcluded, detectHDR,
 } from './config.js'
+import ThreeBanner from './ThreeBanner.jsx'
 
 const APPS = [
   { id: 'radarr', anchor: 'filme', title: 'Filme', icon: '🎬', base: '/radarr', key: RADARR_KEY },
@@ -415,6 +416,8 @@ export default function App() {
         </div>
       </nav>
       <header className="hero">
+        <ThreeBanner />
+        <div className="hero-scrim" />
         <div className="hero-inner">
           <span className="kicker">DEIN MEDIA-STACK</span>
           <h1>Stell ein, was reinkommt.</h1>
