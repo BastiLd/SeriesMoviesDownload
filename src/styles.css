@@ -246,3 +246,25 @@ footer b { color: #ffe08a; }
 .modal-det summary { cursor: pointer; font-weight: 700; }
 .reason { padding: 5px 0; border-bottom: 1px dashed var(--row-edge); word-break: break-word; }
 .modal-actions { display: flex; gap: 10px; align-items: center; margin-top: 6px; }
+
+/* Gesamt-Fortschritt */
+.overall { background: var(--summary-bg); border: 1px solid var(--card-edge); border-radius: 12px; padding: 12px 14px; margin-bottom: 14px; }
+.overall-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+
+/* Staffel-Gruppen (einklappbar) */
+.grp { margin-bottom: 8px; }
+.grp-head { width: 100%; display: flex; align-items: center; gap: 10px; background: var(--row-bg); border: 1px solid var(--row-edge); border-radius: 11px; padding: 10px 12px; cursor: pointer; font-family: 'Nunito'; color: var(--ink); }
+.grp-head:hover { border-color: var(--teal-2); }
+.grp-head.sm { padding: 7px 10px; }
+.grp-arrow { font-size: 12px; width: 14px; color: var(--ink-soft); }
+.grp-label { font-weight: 800; font-size: 15px; }
+.grp-count { background: var(--teal-2); color: #fff; font-size: 12px; font-weight: 800; padding: 1px 9px; border-radius: 999px; }
+.grp-bar { flex: 1; min-width: 60px; }
+.grp-pct { font-weight: 800; font-size: 14px; color: var(--green); min-width: 42px; text-align: right; }
+.grp .dl-row { padding-left: 12px; padding-right: 12px; }
+
+/* fehlt: scrollbar */
+.miss-scroll { max-height: 360px; overflow-y: auto; padding-right: 6px; }
+.miss-scroll::-webkit-scrollbar { width: 8px; }
+.miss-scroll::-webkit-scrollbar-thumb { background: var(--card-edge); border-radius: 6px; }
+.tag.seed { background: var(--green); color: #fff; border-color: transparent; }
