@@ -27,6 +27,53 @@ function seasonOf(title = '') {
   const m = title.match(/S(\d{1,2})[. ]?E\d/i) || title.match(/\bS(\d{1,2})\b/i) || title.match(/Season[. ]?(\d{1,2})/i)
   return m ? parseInt(m[1], 10) : null
 }
+
+// ---------- KI (Ollama lokal / Server oder OpenAI-kompatible API) ----------
+const AI_DEFAULT = { provider: 'ollama', model: 'gemma:2b', url: '', key: '', name: 'KI' }
+function getAI() { try { return { ...AI_DEFAULT, ...JSON.parse(localStorage.getItem('regler-ai') || '{}') } } catch { return { ...AI_DEFAULT } } }
+async function callAI(prompt) {
+  const c = getAI()
+  if (c.provider === 'openai') {
+    const r = await fetch((c.url || 'https://api.openai.com/v1').replace(/\/$/, '') + '/chat/completions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + c.key },
+      body: JSON.stringify({ model: c.model, messages: [{ role: 'user', content: prompt }], stream: false }),
+    })
+    if (!r.ok) throw new Error(r.status + ' ' + await r.text())
+    const j = await r.json(); return j.choices?.[0]?.message?.content || '(keine Antwort)'
+  }
+  const base = c.provider === 'ollama-direct' && c.url ? c.url.replace(/\/$/, '') : '/ollama'
+  const r = await fetch(base + '/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: c.model, prompt, stream: false }) })
+  if (!r.ok) throw new Error(r.status + ' ' + await r.text())
+  const j = await r.json(); return j.response || '(keine Antwort)'
+}
+
+function AISettings({ onClose }) {
+  const [c, setC] = useState(getAI())
+  const set = (k, v) => setC(p => ({ ...p, [k]: v }))
+  const save = () => { localStorage.setItem('regler-ai', JSON.stringify(c)); onClose() }
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-head"><h3>🧠 KI-Einstellungen</h3><button className="x" onClick={onClose}>✕</button></div>
+        <label className="prof-label">Anbieter</label>
+        <select className="prof-select" value={c.provider} onChange={e => set('provider', e.target.value)}>
+          <option value="ollama">Ollama – lokal (localhost:11434)</option>
+          <option value="ollama-direct">Ollama – andere Adresse (z. B. Server)</option>
+          <option value="openai">Externe API (OpenAI-kompatibel)</option>
+        </select>
+        {c.provider === 'ollama-direct' && <><label className="prof-label">Ollama-Adresse</label><input className="prof-select" value={c.url} onChange={e => set('url', e.target.value)} placeholder="http://192.168.68.10:11434" /></>}
+        {c.provider === 'openai' && <>
+          <label className="prof-label">Name (frei)</label><input className="prof-select" value={c.name} onChange={e => set('name', e.target.value)} placeholder="z. B. Groq / OpenAI" />
+          <label className="prof-label">Basis-URL</label><input className="prof-select" value={c.url} onChange={e => set('url', e.target.value)} placeholder="https://api.openai.com/v1" />
+          <label className="prof-label">API-Key</label><input className="prof-select" type="password" value={c.key} onChange={e => set('key', e.target.value)} placeholder="sk-..." />
+        </>}
+        <label className="prof-label">Modell</label><input className="prof-select" value={c.model} onChange={e => set('model', e.target.value)} placeholder="gemma:2b" />
+        <div className="modal-box why" style={{ marginTop: 10 }}><b>Modell-Tipp:</b> <b>gemma:2b</b> reicht für kurze Erklärungen, ist aber schwach. Besser (brauchen mehr RAM/GPU): <b>llama3.2:3b</b> (klein, ok) · <b>qwen2.5:7b</b> oder <b>llama3.1:8b</b> (gut, ~8 GB) · <b>gemma2:9b</b> (sehr gut). Installieren: <code>ollama pull qwen2.5:7b</code></div>
+        <div className="modal-actions"><button className="save inline" onClick={save}>💾 Speichern</button><button className="mini-btn" onClick={onClose}>Abbrechen</button></div>
+      </div>
+    </div>
+  )
+}
 const getProfiles = app => api(app, '/api/v3/qualityprofile')
 
 async function ensureCF(app, name, regex) {
@@ -223,6 +270,15 @@ function Status() {
       await api(app, '/api/v3/command', { method: 'POST', body }); setModal(m => ({ ...m, searched: true }))
     } catch (e) { setModal(m => ({ ...m, why: 'Suche-Fehler: ' + e.message })) }
   }
+  const askAI = async () => {
+    const m0 = modal
+    setModal(m => ({ ...m, aiBusy: true }))
+    try {
+      const prompt = `Du bist ein Helfer für eine Medien-Download-App (Radarr/Sonarr). Ein Titel wurde NICHT heruntergeladen.\nTitel: ${m0.title}\nGefundene Releases: ${m0.found}, davon passend zur Regel: ${m0.accepted}\nAblehnungsgründe: ${(m0.reasons || []).join(' | ') || 'keine'}\nErkläre dem Nutzer auf einfachem Deutsch in 2-3 Sätzen, warum nichts geladen wurde und was er konkret in den Einstellungen (Sprache Pflicht/Optional, Qualität min/max, Max-Größe) ändern soll. Kurz und klar.`
+      const a = await callAI(prompt)
+      setModal(m => ({ ...m, aiBusy: false, aiAnswer: a }))
+    } catch (e) { setModal(m => ({ ...m, aiBusy: false, aiAnswer: '⚠️ KI-Fehler: ' + e.message + '  (Läuft Ollama? Modell installiert? Bei „localhost" muss Ollama auf diesem PC laufen – sonst in 🧠 KI-Einstellungen die Server-Adresse setzen.)' })) }
+  }
 
   // Download-Reihen
   const rows = []
@@ -318,8 +374,11 @@ function Status() {
               {modal.fix && <div className="modal-box fix"><b>Lösung:</b> {modal.fix}</div>}
               {modal.reasons?.length > 0 && <details className="modal-det"><summary>technische Ablehnungsgründe</summary>{modal.reasons.map((r, i) => <div key={i} className="reason">{r}</div>)}</details>}
               {modal.searched && <p className="status ok">Suche gestartet! Schau bei „Aktive Downloads".</p>}
+              {modal.aiBusy && <div className="modal-box why">🧠 KI denkt nach…</div>}
+              {modal.aiAnswer && <div className="modal-box ai"><b>🧠 KI:</b> {modal.aiAnswer}</div>}
               <div className="modal-actions">
                 {modal.appId && !modal.searched && <button className="save inline" onClick={() => searchNow(modal.appId, modal.item)}>🔍 Jetzt suchen</button>}
+                {modal.found != null && <button className="mini-btn" onClick={askAI} disabled={modal.aiBusy}>🧠 KI fragen</button>}
                 <button className="mini-btn" onClick={() => setModal(null)}>Schließen</button>
               </div>
             </>}
@@ -397,6 +456,7 @@ export default function App() {
   const [dark, setDark] = useState(() => localStorage.getItem('regler-dark') === '1')
   const [menu, setMenu] = useState(false)
   const [view, setView] = useState(() => localStorage.getItem('regler-view') || 'settings')
+  const [aiOpen, setAiOpen] = useState(false)
   useEffect(() => { document.body.classList.toggle('dark', dark); localStorage.setItem('regler-dark', dark ? '1' : '0') }, [dark])
   useEffect(() => { localStorage.setItem('regler-view', view) }, [view])
 
@@ -412,6 +472,7 @@ export default function App() {
             <button className="menu-btn" onClick={() => setMenu(m => !m)}>Apps ▾</button>
             <div className={'menu' + (menu ? ' open' : '')}>{SERVICES.map(s => <a key={s.label} href={s.url} target="_blank" rel="noreferrer"><span>{s.icon}</span>{s.label}</a>)}</div>
           </div>
+          <button className="theme-btn" onClick={() => setAiOpen(true)} title="KI-Einstellungen">🧠</button>
           <button className="theme-btn" onClick={() => setDark(d => !d)} title="Dark Mode">{dark ? '☀️' : '🌙'}</button>
         </div>
       </nav>
@@ -431,6 +492,7 @@ export default function App() {
         <div><b>Tipp:</b> Für beste 4K ohne Riesendateien: <i>HDR bevorzugt</i> + <i>Max 25 GB</i>. Schnellster Download: im <i>Suchen</i>-Tab „Schnellste (Seeder)".</div>
         <div className="made">MediaStack Regler · lokal auf deinem Laptop</div>
       </footer>
+      {aiOpen && <AISettings onClose={() => setAiOpen(false)} />}
     </div>
   )
 }

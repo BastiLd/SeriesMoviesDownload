@@ -245,6 +245,9 @@ footer b { color: #ffe08a; }
 .modal-box { padding: 12px 14px; border-radius: 12px; font-size: 14.5px; line-height: 1.5; margin-bottom: 10px; }
 .modal-box.why { background: var(--summary-bg); border: 1px solid var(--card-edge); }
 .modal-box.fix { background: rgba(79,157,105,.14); border: 1px solid var(--green); }
+.modal-box.ai { background: rgba(110,170,180,.16); border: 1px solid var(--teal-2); white-space: pre-wrap; }
+.modal input.prof-select { width: 100%; }
+.modal code { background: var(--seg-bg); padding: 1px 6px; border-radius: 5px; font-size: 13px; }
 .modal-det { font-size: 13px; color: var(--ink-soft); margin: 4px 0 12px; }
 .modal-det summary { cursor: pointer; font-weight: 700; }
 .reason { padding: 5px 0; border-bottom: 1px dashed var(--row-edge); word-break: break-word; }

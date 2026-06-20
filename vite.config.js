@@ -14,6 +14,9 @@ export default defineConfig({
       '/sonarr':   { target: 'http://localhost:8989', changeOrigin: true, rewrite: p => p.replace(/^\/sonarr/, '') },
       '/prowlarr': { target: 'http://localhost:9696', changeOrigin: true, rewrite: p => p.replace(/^\/prowlarr/, '') },
       '/qbt':      { target: 'http://localhost:8200', changeOrigin: true, rewrite: p => p.replace(/^\/qbt/, '') },
+      // Lokales Ollama (Standard-Port 11434). Liegt dein Ollama woanders (z.B. Server),
+      // setze OLLAMA_URL beim Start:  set OLLAMA_URL=http://192.168.68.10:11434 && npm run dev
+      '/ollama':   { target: process.env.OLLAMA_URL || 'http://localhost:11434', changeOrigin: true, rewrite: p => p.replace(/^\/ollama/, '') },
     },
   },
 })
