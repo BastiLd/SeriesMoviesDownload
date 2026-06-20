@@ -13,9 +13,17 @@ const APPS = [
 const appById = id => APPS.find(a => a.id === id)
 
 async function api(app, path, opts = {}) {
-  const r = await fetch(app.base + path, { ...opts, headers: { 'X-Api-Key': app.key, 'Content-Type': 'application/json', ...(opts.headers || {}) } })
-  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`)
-  const t = await r.text(); return t ? JSON.parse(t) : null
+  const { timeout, ...rest } = opts
+  let signal, timer
+  if (timeout) { const ac = new AbortController(); signal = ac.signal; timer = setTimeout(() => ac.abort(), timeout) }
+  try {
+    const r = await fetch(app.base + path, { ...rest, signal, headers: { 'X-Api-Key': app.key, 'Content-Type': 'application/json', ...(opts.headers || {}) } })
+    if (!r.ok) throw new Error(`${r.status} ${await r.text()}`)
+    const t = await r.text(); return t ? JSON.parse(t) : null
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error('Zeitlimit (10s) erreicht – langsame Indexer übersprungen. Klick nochmal „Warum?" für das vollständige Ergebnis.')
+    throw e
+  } finally { clearTimeout(timer) }
 }
 function fmtBytes(b) {
   if (!b || b < 0) return '–'
@@ -27,6 +35,46 @@ function seasonOf(title = '') {
   const m = title.match(/S(\d{1,2})[. ]?E\d/i) || title.match(/\bS(\d{1,2})\b/i) || title.match(/Season[. ]?(\d{1,2})/i)
   return m ? parseInt(m[1], 10) : null
 }
+
+// ---------- Download-Status korrekt erkennen ----------
+// Kategorien: active (lädt) · queue (wartet) · meta (Metadaten) · done (fertig) · problem (wirklich fehlend/Fehler)
+const CATS = {
+  active:  { icon: '🟢', label: 'Lädt aktiv' },
+  queue:   { icon: '🟡', label: 'Warteschlange' },
+  meta:    { icon: '🔵', label: 'Metadaten' },
+  done:    { icon: '✅', label: 'Fertig' },
+  problem: { icon: '🔴', label: 'Problem' },
+}
+const DONE_STATES = ['uploading', 'stalledup', 'queuedup', 'forcedup', 'checkingup', 'pausedup', 'completed', 'seeding']
+const PROBLEM_STATES = ['error', 'missingfiles', 'unknown', 'failed', 'pauseddl', 'paused']
+const QUEUE_STATES = ['queueddl', 'stalleddl', 'checkingdl', 'allocating', 'checkingresumedata', 'moving', 'queued', 'delay']
+
+// Kernlogik: ein Torrent mit 0 Seeds/Peers/Speed WARTET (sequenzieller Download) – das ist KEIN Fehler.
+function classifyState(state, { speed = 0, prog = 0, seeds = 0, leech = 0 } = {}) {
+  const st = String(state || '').toLowerCase()
+  if (prog >= 1) return 'done'
+  if (DONE_STATES.includes(st)) return 'done'
+  if (st === 'metadl') return 'meta'
+  if (speed > 0) return 'active'
+  if (PROBLEM_STATES.includes(st)) return 'problem'
+  if (QUEUE_STATES.includes(st) || st.includes('queue')) return 'queue'
+  // 0 Seeds + 0 Peers + 0 Speed, aber kein Fehler-State → wartet in Warteschlange
+  if (seeds === 0 && leech === 0 && speed === 0) return 'queue'
+  return 'queue'
+}
+
+function fmtSpeed(b) { return b > 0 ? fmtBytes(b) + '/s' : '0 B/s' }
+function fmtETA(sec) {
+  if (sec == null || sec < 0 || sec >= 8640000 || !isFinite(sec)) return '—'
+  if (sec < 60) return Math.round(sec) + 's'
+  const m = Math.floor(sec / 60), h = Math.floor(m / 60), d = Math.floor(h / 24)
+  if (d > 0) return d + 'd ' + (h % 24) + 'h'
+  if (h > 0) return h + 'h ' + (m % 60) + 'm'
+  return m + 'm'
+}
+function fmtTime(date) { return date ? date.toLocaleTimeString('de-DE') : '—' }
+// Titel normalisieren für Abgleich missing ↔ Torrent
+function normTitle(s = '') { return s.toLowerCase().replace(/[^a-z0-9]+/g, '') }
 
 // ---------- KI (Ollama lokal / Server oder OpenAI-kompatible API) ----------
 const AI_DEFAULT = { provider: 'ollama', model: 'gemma:2b', url: '', key: '', name: 'KI' }
@@ -215,15 +263,31 @@ function Panel({ app }) {
   )
 }
 
-function suggestFix(reasons) {
+function suggestFix(reasons, meta = {}) {
   const txt = reasons.join(' ').toLowerCase()
   if (txt.includes('custom format') && txt.includes('minimum')) return { why: 'Deine Sprach-Pflicht ist zu streng – kein Release erfüllt sie.', fix: 'In „Einstellungen" die Sprache (z. B. Deutsch) auf „Optional" statt „Pflicht" stellen.' }
   if (txt.includes('meets cutoff')) return { why: 'Es wurde bereits ein passendes Release gegriffen – alles gut.', fix: 'Schau bei „Aktive Downloads" oder in der Bibliothek.' }
+  if (txt.includes('tracker') || txt.includes('indexer') && txt.includes('error')) return { why: 'Ein Indexer/Tracker meldet einen Fehler (offline, Limit erreicht oder Login abgelaufen).', fix: 'In Prowlarr die Indexer testen – evtl. ist ein Tracker gerade down oder dein Tageslimit ist erreicht.' }
   if (txt.includes('not wanted') || (txt.includes('quality') && txt.includes('rejected'))) return { why: 'Die gefundenen Releases haben eine Qualität, die du ausgeschlossen hast.', fix: 'In „Einstellungen" die Qualitäts-Spanne erweitern (z. B. „ab 720p" oder „bis 4K").' }
   if (txt.includes('size')) return { why: 'Die Releases sind größer als deine Max-Größe.', fix: 'In „Einstellungen" die „Max. Dateigröße" erhöhen oder auf „Aus".' }
-  if (txt.includes('seeder')) return { why: 'Die Releases haben zu wenige Seeder (niemand teilt sie gerade).', fix: 'Später nochmal versuchen, oder im „Suchen"-Tab eines mit mehr Seedern wählen.' }
-  if (!reasons.length) return { why: 'Es wurden keine Releases gefunden (gibt es evtl. nicht auf den öffentlichen Indexern).', fix: 'Im „Suchen"-Tab prüfen, oder einen deutschen Tracker hinzufügen.' }
+  if (txt.includes('seeder') || (meta.found > 0 && meta.maxSeed === 0)) return { why: 'Die Releases haben zu wenige Seeder (niemand teilt sie gerade).', fix: 'Später nochmal versuchen, oder im „Suchen"-Tab eines mit mehr Seedern wählen.' }
+  if (!reasons.length && !meta.found) return { why: 'Es wurden keine Releases gefunden (gibt es evtl. nicht auf den öffentlichen Indexern).', fix: 'Im „Suchen"-Tab prüfen, oder einen deutschen Tracker hinzufügen.' }
   return { why: 'Releases wurden gefunden, aber alle abgelehnt.', fix: 'Im „Suchen"-Tab anschauen – dort kannst du auch „abgelehnte" manuell laden.' }
+}
+
+const FILTERS = [
+  { id: 'all', label: 'Alle' },
+  { id: 'active', label: '🟢 Aktiv' },
+  { id: 'queue', label: '🟡 Warteschlange' },
+  { id: 'missing', label: '🔴 Fehlt' },
+  { id: 'done', label: '✅ Fertig' },
+]
+// welche Download-Kategorien zeigt ein Filter?
+const FILTER_CATS = { active: ['active'], queue: ['queue', 'meta'], done: ['done'], missing: ['problem'] }
+
+function StatChip({ cat, n }) {
+  if (!n) return null
+  return <span className={'stat-chip ' + cat}>{CATS[cat].icon} {n}</span>
 }
 
 function Status() {
@@ -233,6 +297,10 @@ function Status() {
   const [modal, setModal] = useState(null)
   const [openG, setOpenG] = useState({})       // aufgeklappte Download-Staffeln
   const [openMiss, setOpenMiss] = useState({})  // aufgeklappte fehlt-Staffeln
+  const [filter, setFilter] = useState('all')
+  const [search, setSearch] = useState('')
+  const [lastUpdate, setLastUpdate] = useState(null)
+  const [flash, setFlash] = useState(false)
 
   const load = async () => {
     try {
@@ -246,21 +314,23 @@ function Status() {
       ])
       const queue = [...(rq.records || []).map(x => ({ ...x, kind: '🎬', appId: 'radarr' })), ...(sq.records || []).map(x => ({ ...x, kind: '📺', appId: 'sonarr' }))]
       setD({ queue, torrents: qbt || [], missR: rm, missS: sm }); setErr(null)
+      setLastUpdate(new Date()); setFlash(true); setTimeout(() => setFlash(false), 700)
     } catch (e) { setErr(e.message) }
   }
   useEffect(() => { load(); const t = setInterval(load, interval); return () => clearInterval(t) }, [interval])
   useEffect(() => { localStorage.setItem('regler-refresh', String(interval)) }, [interval])
 
-  const why = async (appId, item) => {
+  const why = async (appId, item, hasTorrent) => {
     const title = item.title || `${item.series?.title} S${String(item.seasonNumber).padStart(2, '0')}E${String(item.episodeNumber).padStart(2, '0')}`
     setModal({ title, loading: true })
     try {
       const app = appById(appId)
       const q = appId === 'radarr' ? `movieId=${item.id}` : `episodeId=${item.id}`
-      const rel = await api(app, `/api/v3/release?${q}`)
+      const rel = await api(app, `/api/v3/release?${q}`, { timeout: 10000 })
       const accepted = rel.filter(r => !r.rejected)
       const reasons = [...new Set(rel.flatMap(r => r.rejections || []))].slice(0, 5)
-      setModal({ title, loading: false, found: rel.length, accepted: accepted.length, reasons, ...suggestFix(reasons), appId, item })
+      const maxSeed = rel.reduce((a, r) => Math.max(a, r.seeders || 0), 0)
+      setModal({ title, loading: false, found: rel.length, accepted: accepted.length, reasons, maxSeed, hasTorrent, ...suggestFix(reasons, { found: rel.length, accepted: accepted.length, maxSeed }), appId, item })
     } catch (e) { setModal({ title: 'Fehler', loading: false, why: e.message, fix: '', reasons: [] }) }
   }
   const searchNow = async (appId, item) => {
@@ -280,71 +350,164 @@ function Status() {
     } catch (e) { setModal(m => ({ ...m, aiBusy: false, aiAnswer: '⚠️ KI-Fehler: ' + e.message + '  (Läuft Ollama? Modell installiert? Bei „localhost" muss Ollama auf diesem PC laufen – sonst in 🧠 KI-Einstellungen die Server-Adresse setzen.)' })) }
   }
 
-  // Download-Reihen
+  // ----- Download-Reihen aus qBittorrent (+ ergänzend *arr-Queue) bauen -----
+  const torrents = d?.torrents || []
   const rows = []
-  ;(d?.torrents || []).forEach(t => rows.push({ key: t.hash, label: t.name, prog: t.progress, speed: t.dlspeed, state: t.state, size: t.size, sizeleft: t.size * (1 - t.progress) }))
-  ;(d?.queue || []).forEach(q => { if ((d.torrents || []).some(t => t.name === q.title || t.name.replace(/\.\w+$/, '') === q.title)) return; rows.push({ key: 'q' + q.title, label: q.kind + ' ' + q.title, prog: q.size > 0 ? (q.size - q.sizeleft) / q.size : 0, state: q.status, size: q.size, sizeleft: q.sizeleft }) })
+  torrents.forEach(t => {
+    const seeds = t.num_seeds ?? t.numSeeds ?? 0
+    const leech = t.num_leechs ?? t.numLeechs ?? 0
+    const speed = t.dlspeed || 0
+    const prog = t.progress || 0
+    const sizeleft = t.amount_left != null ? t.amount_left : (t.size || 0) * (1 - prog)
+    rows.push({
+      key: t.hash, label: t.name, prog, speed, state: t.state, size: t.size || 0, sizeleft,
+      eta: t.eta, seeds, leech, priority: t.priority || 0,
+      cat: classifyState(t.state, { speed, prog, seeds, leech }),
+    })
+  })
+  ;(d?.queue || []).forEach(q => {
+    if (torrents.some(t => t.name === q.title || t.name.replace(/\.\w+$/, '') === q.title)) return
+    const prog = q.size > 0 ? (q.size - q.sizeleft) / q.size : 0
+    rows.push({
+      key: 'q' + q.title, label: q.kind + ' ' + q.title, prog, speed: 0, state: q.status,
+      size: q.size || 0, sizeleft: q.sizeleft || 0, eta: null, seeds: 0, leech: 0, priority: 0,
+      cat: classifyState(q.status, { prog }),
+    })
+  })
 
-  // nach Staffel gruppieren
-  const groups = {}
-  rows.forEach(r => { const s = seasonOf(r.label); const key = s != null ? 'S' + String(s).padStart(2, '0') : 'movies'; (groups[key] ||= { key, label: s != null ? 'Staffel ' + s : '🎬 Filme / Sonstiges', sort: s != null ? s : 999, items: [] }).items.push(r) })
-  const groupList = Object.values(groups).sort((a, b) => a.sort - b.sort)
+  // Warteschlangen-Positionen vergeben (nach qBittorrent priority, niedriger = früher dran)
+  const queued = rows.filter(r => r.cat === 'queue').sort((a, b) => (a.priority || 9999) - (b.priority || 9999))
+  const posByKey = {}
+  queued.forEach((r, i) => { posByKey[r.key] = i + 1 })
+
+  // Gesamt-Zähler
+  const count = { active: 0, queue: 0, meta: 0, done: 0, problem: 0 }
+  rows.forEach(r => { count[r.cat]++ })
+  const totSpeed = rows.reduce((a, r) => a + (r.speed || 0), 0)
   const totSize = rows.reduce((a, r) => a + (r.size || 0), 0)
   const totDone = rows.reduce((a, r) => a + (r.size || 0) * r.prog, 0)
   const overall = totSize > 0 ? (totDone / totSize) * 100 : 0
-  const gPct = g => { const s = g.items.reduce((a, r) => a + (r.size || 0), 0); const dn = g.items.reduce((a, r) => a + (r.size || 0) * r.prog, 0); return s > 0 ? dn / s * 100 : 0 }
+  const remainBytes = rows.filter(r => r.cat === 'active' || r.cat === 'queue' || r.cat === 'meta').reduce((a, r) => a + (r.sizeleft || 0), 0)
+  const totETA = totSpeed > 0 ? remainBytes / totSpeed : null
 
-  // fehlt: Serien-Folgen nach Staffel
+  // Filter + Suche auf Download-Reihen
+  const q = search.trim().toLowerCase()
+  const visibleRows = rows.filter(r => {
+    if (q && !r.label.toLowerCase().includes(q)) return false
+    if (filter === 'all' || filter === 'missing') return filter === 'all'
+    return (FILTER_CATS[filter] || []).includes(r.cat)
+  })
+
+  // nach Staffel gruppieren
+  const groups = {}
+  visibleRows.forEach(r => { const s = seasonOf(r.label); const key = s != null ? 'S' + String(s).padStart(2, '0') : 'movies'; (groups[key] ||= { key, label: s != null ? 'Staffel ' + s : '🎬 Filme / Sonstiges', sort: s != null ? s : 999, items: [] }).items.push(r) })
+  const groupList = Object.values(groups).sort((a, b) => a.sort - b.sort)
+  const gStat = g => {
+    const s = g.items.reduce((a, r) => a + (r.size || 0), 0)
+    const dn = g.items.reduce((a, r) => a + (r.size || 0) * r.prog, 0)
+    const spd = g.items.reduce((a, r) => a + (r.speed || 0), 0)
+    const left = g.items.filter(r => r.cat === 'active' || r.cat === 'queue' || r.cat === 'meta').reduce((a, r) => a + (r.sizeleft || 0), 0)
+    const c = { active: 0, queue: 0, meta: 0, done: 0, problem: 0 }
+    g.items.forEach(r => c[r.cat]++)
+    return { pct: s > 0 ? dn / s * 100 : 0, speed: spd, eta: spd > 0 ? left / spd : null, c }
+  }
+
+  // ----- fehlt: nur WIRKLICH fehlende (kein Torrent vorhanden) -----
+  // Abgleich: hat ein missing-Eintrag bereits einen passenden Torrent in qBittorrent?
+  const torrentNames = torrents.map(t => normTitle(t.name))
+  const hasTorrentFor = (titleParts) => {
+    const want = titleParts.filter(Boolean).map(normTitle)
+    return torrentNames.some(n => want.every(w => n.includes(w)))
+  }
+  const missRRecords = (d?.missR?.records || []).filter(m => !hasTorrentFor([m.title]))
+  const missSRecords = (d?.missS?.records || []).filter(m => !hasTorrentFor([m.series?.title, 'S' + String(m.seasonNumber).padStart(2, '0')]))
   const missByS = {}
-  ;(d?.missS?.records || []).forEach(m => { const k = m.seasonNumber ?? 0; (missByS[k] ||= []).push(m) })
+  missSRecords.forEach(m => { const k = m.seasonNumber ?? 0; (missByS[k] ||= []).push(m) })
   const missSeasons = Object.keys(missByS).map(Number).sort((a, b) => a - b)
+  const missTotal = missRRecords.length + missSRecords.length
+
+  const showDownloads = filter !== 'missing'
+  const showMissing = filter === 'all' || filter === 'missing'
 
   return (
     <div className="status-wrap">
-      <div className="status-bar"><span className="live-dot" /> Aktualisierung:<Seg small options={REFRESH_OPTS} value={interval} onChange={setIntervalMs} /><button className="mini-btn" onClick={load}>↻ jetzt</button></div>
+      <div className="status-bar">
+        <span className={'live-dot' + (flash ? ' flash' : '')} /> Aktualisierung:
+        <Seg small options={REFRESH_OPTS} value={interval} onChange={setIntervalMs} />
+        <button className="mini-btn" onClick={load}>↻ jetzt</button>
+        <span className="last-upd">Zuletzt: {fmtTime(lastUpdate)}</span>
+      </div>
+      <div className="filter-bar">
+        <div className="filter-btns">{FILTERS.map(f => <button key={f.id} className={'filter-btn' + (filter === f.id ? ' on' : '')} onClick={() => setFilter(f.id)}>{f.label}</button>)}</div>
+        <input className="filter-search" placeholder="🔍 Serie/Film suchen…" value={search} onChange={e => setSearch(e.target.value)} />
+      </div>
       {err && <div className="card status-card"><p className="status err">Fehler: {err}</p></div>}
       {!d && !err && <div className="card status-card"><p className="hint">lade…</p></div>}
       {d && <>
-        <section className="card status-card">
-          <div className="card-head"><span className="emoji">⬇️</span><h2>Aktive Downloads</h2><span className="live">{rows.filter(r => r.prog < 1).length} aktiv · {rows.length} gesamt</span></div>
-          {rows.length === 0 && <p className="empty">Gerade läuft kein Download.</p>}
+        {showDownloads && <section className="card status-card">
+          <div className="card-head"><span className="emoji">⬇️</span><h2>Aktive Downloads</h2>
+            <span className="dl-totspeed">↓ {fmtSpeed(totSpeed)}</span>
+          </div>
+          <div className="stat-row">
+            <StatChip cat="active" n={count.active} />
+            <StatChip cat="queue" n={count.queue} />
+            <StatChip cat="meta" n={count.meta} />
+            <StatChip cat="done" n={count.done} />
+            <StatChip cat="problem" n={count.problem} />
+            {rows.length === 0 && <span className="empty">Gerade läuft kein Download.</span>}
+            {totETA != null && <span className="stat-eta">⏱ noch ca. {fmtETA(totETA)}</span>}
+          </div>
           {rows.length > 0 && <div className="overall"><div className="overall-top"><b>Gesamt-Fortschritt</b><span className="dl-pct">{Math.round(overall)}%</span></div><Bar pct={overall} /></div>}
+          {groupList.length === 0 && rows.length > 0 && <p className="empty">Keine Treffer für diesen Filter/Suche.</p>}
           {groupList.map(g => {
             const open = !!openG[g.key]
+            const st = gStat(g)
             return (
               <div className="grp" key={g.key}>
                 <button className="grp-head" onClick={() => setOpenG(o => ({ ...o, [g.key]: !o[g.key] }))}>
                   <span className="grp-arrow">{open ? '▾' : '▸'}</span>
                   <span className="grp-label">{g.label}</span>
                   <span className="grp-count">{g.items.length}</span>
-                  <span className="grp-bar"><Bar pct={gPct(g)} /></span>
-                  <span className="grp-pct">{Math.round(gPct(g))}%</span>
+                  <span className="grp-icons">{['active', 'queue', 'meta', 'done', 'problem'].map(c => st.c[c] ? <span key={c} className="mini-icon">{CATS[c].icon}{st.c[c]}</span> : null)}</span>
+                  <span className="grp-bar"><Bar pct={st.pct} /></span>
+                  <span className="grp-pct">{Math.round(st.pct)}%</span>
+                  <span className="grp-spd">{st.speed > 0 ? '↓ ' + fmtBytes(st.speed) + '/s' : ''}{st.eta != null ? ' · ' + fmtETA(st.eta) : ''}</span>
                 </button>
                 {open && g.items.map(r => (
-                  <div className="dl-row" key={r.key}>
-                    <div className="dl-top"><span className="dl-name">{r.label}</span><span className="dl-pct">{Math.round(r.prog * 100)}%</span></div>
+                  <div className={'dl-row cat-' + r.cat} key={r.key}>
+                    <div className="dl-top">
+                      <span className="dl-name"><span className="dl-ico">{CATS[r.cat].icon}</span>{r.label}</span>
+                      <span className="dl-pct">{Math.round(r.prog * 100)}%</span>
+                    </div>
                     <Bar pct={r.prog * 100} />
-                    <div className="dl-meta">{r.state}{r.speed ? ' · ↓ ' + fmtBytes(r.speed) + '/s' : ''} · {fmtBytes(r.sizeleft)} übrig von {fmtBytes(r.size)}</div>
+                    <div className="dl-meta">
+                      <span className="dl-state">{CATS[r.cat].label}</span>
+                      {r.cat === 'queue' && posByKey[r.key] ? ' · ⏳ Position ' + posByKey[r.key] + ' in Warteschlange' : ''}
+                      {r.speed > 0 ? ' · ↓ ' + fmtBytes(r.speed) + '/s' : ''}
+                      {r.cat === 'active' ? ' · ⏱ ' + fmtETA(r.eta != null ? r.eta : (r.speed > 0 ? r.sizeleft / r.speed : null)) : ''}
+                      {' · ' + fmtBytes(r.sizeleft) + ' übrig von ' + fmtBytes(r.size)}
+                      {(r.cat === 'queue' || r.cat === 'problem') ? ' · ' + r.seeds + ' Seeds / ' + r.leech + ' Peers' : ''}
+                    </div>
                   </div>
                 ))}
               </div>
             )
           })}
-        </section>
+        </section>}
 
-        <section className="card status-card warn">
-          <div className="card-head"><span className="emoji">🔎</span><h2>Noch nichts gefunden / fehlt</h2></div>
-          <p className="hint">Klick auf „Warum?" – ich prüfe, woran es liegt und schlage eine Lösung vor.</p>
+        {showMissing && <section className="card status-card warn">
+          <div className="card-head"><span className="emoji">🔴</span><h2>Wirklich fehlend</h2><span className="live">{missTotal}</span></div>
+          <p className="hint">Nur Inhalte ohne Torrent in qBittorrent. Wartende Downloads stehen oben unter „Warteschlange". Klick „Warum?" für die Diagnose.</p>
           <div className="miss-grid">
             <div>
-              <div className="miss-head">🎬 Filme ({d.missR.totalRecords ?? 0})</div>
+              <div className="miss-head">🎬 Filme ({missRRecords.length})</div>
               <div className="miss-scroll">
-                {(d.missR.records || []).map(m => <div className="miss-item act" key={m.id}><span>{m.title} {m.year ? '(' + m.year + ')' : ''}</span><button className="why-btn" onClick={() => why('radarr', m)}>Warum?</button></div>)}
-                {(d.missR.records || []).length === 0 && <div className="miss-item empty">— nichts —</div>}
+                {missRRecords.map(m => <div className="miss-item act" key={m.id}><span>{m.title} {m.year ? '(' + m.year + ')' : ''}</span><button className="why-btn" onClick={() => why('radarr', m, false)}>Warum?</button></div>)}
+                {missRRecords.length === 0 && <div className="miss-item empty">— nichts —</div>}
               </div>
             </div>
             <div>
-              <div className="miss-head">📺 Serien-Folgen ({d.missS.totalRecords ?? 0})</div>
+              <div className="miss-head">📺 Serien-Folgen ({missSRecords.length})</div>
               <div className="miss-scroll">
                 {missSeasons.map(s => {
                   const open = !!openMiss[s]
@@ -353,7 +516,7 @@ function Status() {
                       <button className="grp-head sm" onClick={() => setOpenMiss(o => ({ ...o, [s]: !o[s] }))}>
                         <span className="grp-arrow">{open ? '▾' : '▸'}</span><span className="grp-label">Staffel {s}</span><span className="grp-count">{missByS[s].length}</span>
                       </button>
-                      {open && missByS[s].map(m => <div className="miss-item act" key={m.id}><span>{m.series?.title || ''} S{String(m.seasonNumber).padStart(2, '0')}E{String(m.episodeNumber).padStart(2, '0')}</span><button className="why-btn" onClick={() => why('sonarr', m)}>Warum?</button></div>)}
+                      {open && missByS[s].map(m => <div className="miss-item act" key={m.id}><span>{m.series?.title || ''} S{String(m.seasonNumber).padStart(2, '0')}E{String(m.episodeNumber).padStart(2, '0')}</span><button className="why-btn" onClick={() => why('sonarr', m, false)}>Warum?</button></div>)}
                     </div>
                   )
                 })}
@@ -361,15 +524,15 @@ function Status() {
               </div>
             </div>
           </div>
-        </section>
+        </section>}
       </>}
 
       {modal && (
         <div className="overlay" onClick={() => setModal(null)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="modal-head"><h3>{modal.title}</h3><button className="x" onClick={() => setModal(null)}>✕</button></div>
-            {modal.loading ? <p className="hint">analysiere über alle Indexer … (~30s)</p> : <>
-              {modal.found != null && <p className="modal-stat"><b>{modal.found}</b> Releases gefunden · <b>{modal.accepted}</b> passen zu deiner Regel</p>}
+            {modal.loading ? <p className="hint">analysiere über alle Indexer … (max. 10s)</p> : <>
+              {modal.found != null && <p className="modal-stat"><b>{modal.found}</b> Releases gefunden · <b>{modal.accepted}</b> passen zu deiner Regel{modal.maxSeed != null ? ' · max. ' + modal.maxSeed + ' Seeder' : ''}</p>}
               <div className="modal-box why"><b>Warum:</b> {modal.why}</div>
               {modal.fix && <div className="modal-box fix"><b>Lösung:</b> {modal.fix}</div>}
               {modal.reasons?.length > 0 && <details className="modal-det"><summary>technische Ablehnungsgründe</summary>{modal.reasons.map((r, i) => <div key={i} className="reason">{r}</div>)}</details>}
