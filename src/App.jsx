@@ -3,6 +3,8 @@ import {
   RADARR_KEY, SONARR_KEY, cfReqName, cfPrefName, cfMaxName, CF_HDR, HDR_REGEX, LEGACY_CFS,
   LANGUAGES, STATES, QUALITY_MIN, QUALITY_MAX, HDR_STATES, MAXSIZE, REFRESH_OPTS, SERVICES,
   qName, tierOf, isExcluded, detectHDR,
+  CODECS, CODEC_STATES, REMUX_STATES, cfCodecName, cfRemuxName, cfBlacklistName,
+  CODEC_REGEX, REMUX_REGEX, blacklistRegex, CODEC_DEFAULT,
 } from './config.js'
 import ThreeBanner from './ThreeBanner.jsx'
 
@@ -143,7 +145,7 @@ async function deleteByName(app, name) {
   try { const list = await api(app, '/api/v3/customformat'); const cf = list.find(c => c.name === name); if (cf) await api(app, `/api/v3/customformat/${cf.id}`, { method: 'DELETE' }) } catch (e) {}
 }
 
-async function applySettings(app, profileId, { langStates, minTier, maxTier, hdr, maxSize }) {
+async function applySettings(app, profileId, { langStates, minTier, maxTier, hdr, maxSize, codecStates = {}, remux = false, blacklist = '' }) {
   const reqName = cfReqName(profileId), prefName = cfPrefName(profileId), maxName = cfMaxName(profileId)
   const required = LANGUAGES.filter(l => langStates[l.id] === 'required')
   const preferred = LANGUAGES.filter(l => langStates[l.id] === 'preferred')
@@ -153,6 +155,17 @@ async function applySettings(app, profileId, { langStates, minTier, maxTier, hdr
   await ensureCF(app, prefName, prefRegex)
   await ensureCF(app, CF_HDR, HDR_REGEX)
   if (maxSize > 0) await ensureSizeCF(app, maxName, maxSize)
+  // Codec-CFs: nur anlegen wenn nicht „egal", sonst aufraeumen
+  for (const c of CODECS) {
+    const name = cfCodecName(profileId, c.id)
+    if (codecStates[c.id] && codecStates[c.id] !== 'off') await ensureCF(app, name, CODEC_REGEX(c.id))
+    else await deleteByName(app, name)
+  }
+  const remuxName = cfRemuxName(profileId)
+  if (remux) await ensureCF(app, remuxName, REMUX_REGEX); else await deleteByName(app, remuxName)
+  const blName = cfBlacklistName(profileId)
+  const blGroups = String(blacklist || '').split(',').map(s => s.trim()).filter(Boolean)
+  if (blGroups.length) await ensureCF(app, blName, blacklistRegex(blGroups)); else await deleteByName(app, blName)
   for (const n of LEGACY_CFS) await deleteByName(app, n)
   const p = await api(app, `/api/v3/qualityprofile/${profileId}`)
   let highId = null, highTier = -1
@@ -167,11 +180,16 @@ async function applySettings(app, profileId, { langStates, minTier, maxTier, hdr
   p.upgradeAllowed = true
   p.minFormatScore = required.length ? 100 : 0
   const hdrScore = hdr === 'pref' ? 25 : hdr === 'no' ? -25 : 0
+  const codecScoreName = {}
+  for (const c of CODECS) codecScoreName[cfCodecName(profileId, c.id)] = codecStates[c.id] === 'pref' ? 15 : codecStates[c.id] === 'no' ? -15 : 0
   ;(p.formatItems || []).forEach(fi => {
     if (fi.name === reqName) fi.score = required.length ? 100 : 0
     else if (fi.name === prefName) fi.score = preferred.length ? 20 : 0
     else if (fi.name === CF_HDR) fi.score = hdrScore
     else if (fi.name === maxName) fi.score = maxSize > 0 ? -1000 : 0
+    else if (fi.name === remuxName) fi.score = remux ? 50 : 0
+    else if (fi.name === blName) fi.score = blGroups.length ? -10000 : 0
+    else if (fi.name in codecScoreName) fi.score = codecScoreName[fi.name]
     else if (fi.name.startsWith('Regler ')) fi.score = 0
   })
   await api(app, `/api/v3/qualityprofile/${profileId}`, { method: 'PUT', body: JSON.stringify(p) })
@@ -203,7 +221,41 @@ async function loadSettings(app, profileId) {
   let maxSize = 0
   if (maxScore < 0) { const mc = cfs.find(c => c.name === cfMaxName(profileId)); maxSize = Number(mc?.specifications?.[0]?.fields?.find(f => f.name === 'min')?.value) || 0 }
   if (![0, 15, 25, 50].includes(maxSize)) maxSize = maxSize > 0 ? 25 : 0
-  return { langStates, minTier, maxTier, hdr, maxSize }
+  // Erweiterte Optionen einlesen
+  const codecStates = CODEC_DEFAULT()
+  for (const c of CODECS) { const sc = fi.find(f => f.name === cfCodecName(profileId, c.id))?.score || 0; codecStates[c.id] = sc > 0 ? 'pref' : sc < 0 ? 'no' : 'off' }
+  const remux = (fi.find(f => f.name === cfRemuxName(profileId))?.score || 0) > 0
+  const blCF = cfs.find(c => c.name === cfBlacklistName(profileId))
+  let blacklist = ''
+  if (blCF) {
+    const v = blCF.specifications?.[0]?.fields?.find(f => f.name === 'value')?.value || ''
+    blacklist = v.replace(/^\(\?i\)\(?/, '').replace(/\)$/, '').split('|').map(s => s.replace(/\\(.)/g, '$1').trim()).filter(Boolean).join(', ')
+  }
+  return { langStates, minTier, maxTier, hdr, maxSize, codecStates, remux, blacklist }
+}
+
+// ---------- Toast / Snackbar (globaler Mini-Event-Bus) ----------
+let toastSeq = 0
+const toastSubs = new Set()
+function toast(text, kind = 'ok', ms = 4200) { const id = ++toastSeq; toastSubs.forEach(fn => fn({ id, text, kind, ms })); return id }
+function ToastHost() {
+  const [items, setItems] = useState([])
+  useEffect(() => {
+    const add = t => { setItems(p => [...p, t]); setTimeout(() => setItems(p => p.filter(x => x.id !== t.id)), t.ms) }
+    toastSubs.add(add); return () => toastSubs.delete(add)
+  }, [])
+  if (!items.length) return null
+  return (
+    <div className="toast-host">
+      {items.map(t => (
+        <div key={t.id} className={'toast ' + t.kind} onClick={() => setItems(p => p.filter(x => x.id !== t.id))}>
+          <span className="toast-ico">{t.kind === 'err' ? '⚠️' : t.kind === 'info' ? 'ℹ️' : '✅'}</span>
+          <span className="toast-txt">{t.text}</span>
+          <span className="toast-x">✕</span>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 function Seg({ options, value, onChange, small }) {
@@ -211,55 +263,275 @@ function Seg({ options, value, onChange, small }) {
 }
 function Bar({ pct }) { return <div className="bar"><div className="bar-fill" style={{ width: Math.round(pct) + '%' }} /></div> }
 
-function Panel({ app }) {
+// ---------- Helfer fuer die Einstellungen ----------
+const SETTINGS_DEFAULT = () => ({ langStates: Object.fromEntries(LANGUAGES.map(l => [l.id, 'off'])), minTier: 1080, maxTier: 2160, hdr: 'off', maxSize: 0, codecStates: CODEC_DEFAULT(), remux: false, blacklist: '' })
+function normalizeSettings(s = {}) { const d = SETTINGS_DEFAULT(); return { ...d, ...s, langStates: { ...d.langStates, ...(s.langStates || {}) }, codecStates: { ...d.codecStates, ...(s.codecStates || {}) } } }
+function qLabelOf(min, max) { return min === max ? (min === 2160 ? 'nur 4K' : 'nur ' + min + 'p') : `${min}p–${max === 2160 ? '4K' : max + 'p'}` }
+function tierLabel(t) { return t === 2160 ? '2160p' : t === 1080 ? '1080p' : t === 720 ? '720p' : '480p' }
+function relTime(ts) {
+  if (!ts) return null
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000))
+  if (s < 45) return 'gerade eben'
+  const m = Math.round(s / 60); if (m < 60) return `vor ${m} Min.`
+  const h = Math.round(m / 60); if (h < 24) return `vor ${h} Std.`
+  return `vor ${Math.round(h / 24)} Tg.`
+}
+const codecStateLabel = id => CODEC_STATES.find(s => s.id === id)?.label || id
+
+// Live-Vorschau: aus den Einstellungen Beispiel-Dateinamen ableiten (akzeptiert / abgelehnt)
+function buildPreview(s) {
+  const req = LANGUAGES.filter(l => s.langStates[l.id] === 'required')
+  const prefCodec = CODECS.find(c => s.codecStates[c.id] === 'pref')
+  const noCodecs = CODECS.filter(c => s.codecStates[c.id] === 'no')
+  const langPart = req.length ? req.map(l => l.sample).join('.') : 'German'
+  const codecPart = prefCodec ? prefCodec.sample : 'x265'
+  const base = 'The.Mentalist.S01E01'
+  const accepted = [`${base}.${tierLabel(s.maxTier)}.BluRay.${langPart}.${codecPart}.mkv`]
+  if (s.remux) accepted.push(`${base}.${tierLabel(s.maxTier)}.BluRay.REMUX.${langPart}.${codecPart}.mkv`)
+  const rejected = []
+  if (req.length) rejected.push({ name: `${base}.${tierLabel(s.maxTier)}.BluRay.English.${codecPart}.mkv`, reason: `fehlt: ${req.map(l => l.label).join(' + ')}` })
+  if (s.minTier > 720) rejected.push({ name: `${base}.720p.WEB.${langPart}.${codecPart}.mkv`, reason: `Qualität unter ${tierLabel(s.minTier)}` })
+  if (s.maxTier < 2160) rejected.push({ name: `${base}.2160p.BluRay.${langPart}.${codecPart}.mkv`, reason: 'über Max-Qualität (4K)' })
+  if (s.hdr === 'no') rejected.push({ name: `${base}.${tierLabel(s.maxTier)}.BluRay.HDR.${langPart}.${codecPart}.mkv`, reason: 'HDR ausgeschlossen' })
+  for (const c of noCodecs) rejected.push({ name: `${base}.${tierLabel(s.maxTier)}.BluRay.${langPart}.${c.sample}.mkv`, reason: `Codec ${c.label} nicht erwünscht` })
+  const blGroups = String(s.blacklist || '').split(',').map(x => x.trim()).filter(Boolean)
+  if (blGroups.length) rejected.push({ name: `${base}.${tierLabel(s.maxTier)}.BluRay.${langPart}.${codecPart}-${blGroups[0]}.mkv`, reason: `Release-Gruppe „${blGroups[0]}" blockiert` })
+  if (s.maxSize > 0) rejected.push({ name: `${base}.2160p.BluRay.REMUX.${langPart}.${codecPart}.mkv`, reason: `größer als ${s.maxSize} GB` })
+  return { accepted, rejected: rejected.slice(0, 5) }
+}
+
+function describeSettings(s) {
+  return [
+    { k: 'Sprache Pflicht', v: LANGUAGES.filter(l => s.langStates[l.id] === 'required').map(l => l.label).join(', ') || '—' },
+    { k: 'Sprache Optional', v: LANGUAGES.filter(l => s.langStates[l.id] === 'preferred').map(l => l.label).join(', ') || '—' },
+    { k: 'Qualität', v: qLabelOf(s.minTier, s.maxTier) },
+    { k: 'HDR / DV', v: s.hdr === 'pref' ? 'bevorzugt' : s.hdr === 'no' ? 'ohne' : 'egal' },
+    { k: 'Max-Größe', v: s.maxSize > 0 ? s.maxSize + ' GB' : 'aus' },
+    { k: 'Codec', v: CODECS.filter(c => s.codecStates[c.id] === 'pref').map(c => c.label).join(', ') || 'egal' },
+    { k: 'Remux', v: s.remux ? 'bevorzugt' : 'egal' },
+    { k: 'Blacklist', v: (s.blacklist || '').trim() || '—' },
+  ]
+}
+
+// ---------- Hook: kapselt Laden/Speichern/Historie eines Panels ----------
+function usePanelState(app) {
   const [profiles, setProfiles] = useState([])
   const [sel, setSel] = useState(null)
-  const [langStates, setLangStates] = useState(Object.fromEntries(LANGUAGES.map(l => [l.id, 'off'])))
-  const [minTier, setMinTier] = useState(1080)
-  const [maxTier, setMaxTier] = useState(2160)
-  const [hdr, setHdr] = useState('off')
-  const [maxSize, setMaxSize] = useState(0)
+  const [settings, setSettings] = useState(SETTINGS_DEFAULT())
   const [status, setStatus] = useState({ text: 'verbinde…', kind: 'info' })
   const [busy, setBusy] = useState(false)
+  const [lastSaved, setLastSaved] = useState(null)
+  const [history, setHistory] = useState([])      // [{field,label,old,value,time}]
+  const [lastChange, setLastChange] = useState(null)
+  const [conn, setConn] = useState(null)          // {ms,version} | {error}
+  const [dirty, setDirty] = useState(false)
+  const savedKey = id => `regler-saved-${app.id}-${id}`
 
   useEffect(() => { (async () => { try { const list = await getProfiles(app); setProfiles(list); setSel(list.find(p => p.id === 4)?.id ?? list[0]?.id) } catch (e) { setStatus({ text: 'keine Verbindung (Stack/Docker an?)', kind: 'err' }) } })() }, [])
   useEffect(() => {
     if (sel == null) return
-    (async () => {
-      setStatus({ text: 'lade Profil…', kind: 'info' })
-      try { const s = await loadSettings(app, sel); setLangStates(s.langStates); setMinTier(s.minTier); setMaxTier(s.maxTier); setHdr(s.hdr); setMaxSize(s.maxSize); setStatus({ text: 'verbunden – Profil geladen', kind: 'ok' }) }
+    setStatus({ text: 'lade Profil…', kind: 'info' }); setHistory([]); setLastChange(null); setDirty(false)
+    const ls = Number(localStorage.getItem(savedKey(sel))); setLastSaved(ls || null)
+    ;(async () => {
+      try { const s = await loadSettings(app, sel); setSettings(normalizeSettings(s)); setStatus({ text: 'verbunden – Profil geladen', kind: 'ok' }) }
       catch (e) { setStatus({ text: 'Fehler: ' + e.message, kind: 'err' }) }
     })()
   }, [sel])
-  const setLang = (id, st) => setLangStates(p => ({ ...p, [id]: st }))
+
+  const update = (field, value, label) => {
+    setSettings(prev => {
+      setHistory(h => [{ field, label, old: prev[field], value, time: Date.now() }, ...h].slice(0, 25))
+      return { ...prev, [field]: value }
+    })
+    setLastChange({ field, value, label }); setDirty(true)
+  }
+  const setLang = (id, st) => update('langStates', { ...settings.langStates, [id]: st }, `${LANGUAGES.find(l => l.id === id).label} → ${STATES.find(x => x.id === st).label}`)
+  const setCodec = (id, st) => update('codecStates', { ...settings.codecStates, [id]: st }, `Codec ${CODECS.find(c => c.id === id).label} → ${codecStateLabel(st)}`)
+  const undo = () => setHistory(h => { if (!h.length) return h; const [last, ...rest] = h; setSettings(s => ({ ...s, [last.field]: last.old })); setLastChange(null); setDirty(true); toast(`Rückgängig: ${last.label}`, 'info'); return rest })
+  const applyField = (field, value, label) => update(field, value, label)
+  const importSettings = obj => { setSettings(normalizeSettings(obj)); setDirty(true); setLastChange(null); setHistory([]) }
+
   const save = async () => {
-    let mx = maxTier < minTier ? minTier : maxTier
+    const mx = settings.maxTier < settings.minTier ? settings.minTier : settings.maxTier
     setBusy(true); setStatus({ text: 'speichere…', kind: 'info' })
-    try { await applySettings(app, sel, { langStates, minTier, maxTier: mx, hdr, maxSize }); setStatus({ text: 'Gespeichert – sofort aktiv ✓', kind: 'ok' }) }
-    catch (e) { setStatus({ text: 'Fehler: ' + e.message, kind: 'err' }) }
+    try {
+      await applySettings(app, sel, { ...settings, maxTier: mx })
+      const t = Date.now(); setLastSaved(t); localStorage.setItem(savedKey(sel), String(t))
+      setStatus({ text: 'Gespeichert – sofort aktiv ✓', kind: 'ok' }); setDirty(false); setLastChange(null)
+      toast(`✅ ${app.title}: Gespeichert und an ${app.id === 'radarr' ? 'Radarr' : 'Sonarr'} übertragen`, 'ok')
+    } catch (e) { setStatus({ text: 'Fehler: ' + e.message, kind: 'err' }); toast(`⚠️ ${app.title}: Speichern fehlgeschlagen – ${e.message}`, 'err', 6000) }
     setBusy(false)
   }
-  const reqList = LANGUAGES.filter(l => langStates[l.id] === 'required').map(l => l.label)
+  const testConnection = async () => {
+    setConn({ loading: true })
+    const t0 = performance.now()
+    try { const s = await api(app, '/api/v3/system/status', { timeout: 8000 }); setConn({ ms: Math.round(performance.now() - t0), version: s.version }); toast(`🔌 ${app.title}: erreichbar (${Math.round(performance.now() - t0)} ms · API ${s.version})`, 'ok') }
+    catch (e) { setConn({ error: e.message }); toast(`🔌 ${app.title}: keine Verbindung`, 'err', 6000) }
+  }
   const profName = profiles.find(p => p.id === sel)?.name || ''
-  const qLabel = minTier === maxTier ? (minTier === 2160 ? 'nur 4K' : 'nur ' + minTier + 'p') : `${minTier}p–${maxTier === 2160 ? '4K' : maxTier + 'p'}`
+  return { app, profiles, sel, setSel, settings, update, setLang, setCodec, undo, applyField, importSettings, save, testConnection, status, busy, lastSaved, history, lastChange, setLastChange, conn, dirty, profName }
+}
+
+// ---------- Live-Vorschau ----------
+function Preview({ settings }) {
+  const { accepted, rejected } = buildPreview(settings)
+  return (
+    <div className="preview">
+      <div className="prev-head">👁️ Live-Vorschau – was diese Regeln bedeuten</div>
+      {accepted.map((n, i) => <div className="prev-row ok" key={'a' + i}><span className="prev-mark">✅</span><code>{n}</code><span className="prev-tag">würde akzeptiert</span></div>)}
+      {rejected.map((r, i) => <div className="prev-row no" key={'r' + i}><span className="prev-mark">❌</span><code>{r.name}</code><span className="prev-tag">{r.reason}</span></div>)}
+      {rejected.length === 0 && <p className="hint">Sehr offene Regeln – fast alles würde akzeptiert.</p>}
+    </div>
+  )
+}
+
+// ---------- Änderungshistorie + Rückgängig ----------
+function History({ history, onUndo }) {
+  if (!history.length) return null
+  const last = history[0]
+  return (
+    <div className="history">
+      <div className="hist-top">
+        <span className="hist-label">🕘 Zuletzt geändert: <b>{last.label}</b> ({relTime(last.time)})</span>
+        <button className="mini-btn" onClick={onUndo}>↩ Rückgängig</button>
+      </div>
+      {history.length > 1 && (
+        <details className="hist-det"><summary>Verlauf ({history.length})</summary>
+          {history.map((h, i) => <div className="hist-item" key={i}><span>{h.label}</span><span className="hist-time">{relTime(h.time)}</span></div>)}
+        </details>
+      )}
+    </div>
+  )
+}
+
+// ---------- Präsentations-Panel ----------
+function Panel({ p, peer }) {
+  const { app, settings, status, busy, lastSaved, profName, lastChange } = p
+  const s = settings
+  const applyToPeer = () => { peer.applyField(lastChange.field, lastChange.value, `von ${app.title} übernommen`); toast(`↔ „${lastChange.label}" auch für ${peer.app.title} übernommen`, 'info'); p.setLastChange(null) }
 
   return (
     <section className="card" id={app.anchor}>
-      <div className="card-head"><span className="emoji">{app.icon}</span><h2>{app.title}</h2><span className={'dot-status ' + status.kind} /></div>
+      <div className="card-head"><span className="emoji">{app.icon}</span><h2>{app.title}</h2>{p.dirty && <span className="dirty-pill">● ungespeichert</span>}<span className={'dot-status ' + status.kind} /></div>
+
+      {/* Verbindungsstatus prominent */}
+      <div className={'conn-banner ' + status.kind}>
+        <span className="conn-dot" />
+        <div className="conn-info">
+          <div className="conn-line">{status.kind === 'ok' ? '🟢 Verbunden' : status.kind === 'err' ? '🔴 Keine Verbindung' : '🟡 ' + status.text}</div>
+          <div className="conn-sub">Profil <b>{profName || '—'}</b> · {lastSaved ? <>zuletzt gespeichert <b>{relTime(lastSaved)}</b></> : 'noch nicht gespeichert'}</div>
+        </div>
+        <button className="mini-btn" onClick={p.testConnection} disabled={p.conn?.loading}>{p.conn?.loading ? '…' : '🔌 Test'}</button>
+      </div>
+      {p.conn && !p.conn.loading && <div className={'conn-test ' + (p.conn.error ? 'err' : 'ok')}>{p.conn.error ? '⚠️ ' + p.conn.error : `✅ erreichbar · ${p.conn.ms} ms · API-Version ${p.conn.version}`}</div>}
+
+      {lastChange && peer.settings[lastChange.field] !== undefined && (
+        <div className="apply-both"><span>„{lastChange.label}" – gleiche Einstellung auch für {peer.app.title}?</span><button className="mini-btn accent" onClick={applyToPeer}>↔ Auf beide anwenden</button></div>
+      )}
+
       <label className="prof-label">Profil (beim Hinzufügen wählbar)</label>
-      <select className="prof-select" value={sel ?? ''} onChange={e => setSel(Number(e.target.value))}>{profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+      <select className="prof-select" value={p.sel ?? ''} onChange={e => p.setSel(Number(e.target.value))}>{p.profiles.map(pr => <option key={pr.id} value={pr.id}>{pr.name}</option>)}</select>
+
       <h3>Sprachen</h3>
-      <div className="langs">{LANGUAGES.map(l => <div className="lang-row" key={l.id}><span className="lang-name"><span className="flag">{l.flag}</span>{l.label}</span><Seg small options={STATES} value={langStates[l.id]} onChange={st => setLang(l.id, st)} /></div>)}</div>
+      <div className="langs">{LANGUAGES.map(l => <div className="lang-row" key={l.id}><span className="lang-name"><span className="flag">{l.flag}</span>{l.label}</span><Seg small options={STATES} value={s.langStates[l.id]} onChange={st => p.setLang(l.id, st)} /></div>)}</div>
+
       <h3>Qualität</h3>
-      <div className="qrow"><span className="qlab">Mindestens</span><Seg small options={QUALITY_MIN} value={minTier} onChange={setMinTier} /></div>
-      <div className="qrow"><span className="qlab">Höchstens</span><Seg small options={QUALITY_MAX} value={maxTier} onChange={setMaxTier} /></div>
-      <div className="qrow"><span className="qlab">HDR / Dolby Vision</span><Seg small options={HDR_STATES} value={hdr} onChange={setHdr} /></div>
-      <div className="qrow"><span className="qlab">Max. Dateigröße</span><Seg small options={MAXSIZE} value={maxSize} onChange={setMaxSize} /></div>
-      <p className="hint">Innerhalb der Spanne wird die beste Qualität bevorzugt. Max-Größe lehnt zu große Dateien ab.</p>
-      <div className="summary"><b>{profName}</b> · <b>{qLabel}</b>{hdr === 'pref' ? ' · HDR bevorzugt' : hdr === 'no' ? ' · ohne HDR' : ''}{maxSize > 0 ? ' · max ' + maxSize + ' GB' : ''}</div>
-      <button className="save" onClick={save} disabled={busy || sel == null}>{busy ? '…' : '💾  Speichern & aktivieren'}</button>
+      <div className="qrow"><span className="qlab">Mindestens</span><Seg small options={QUALITY_MIN} value={s.minTier} onChange={v => p.update('minTier', v, 'Min-Qualität → ' + tierLabel(v))} /></div>
+      <div className="qrow"><span className="qlab">Höchstens</span><Seg small options={QUALITY_MAX} value={s.maxTier} onChange={v => p.update('maxTier', v, 'Max-Qualität → ' + tierLabel(v))} /></div>
+      <div className="qrow"><span className="qlab">HDR / Dolby Vision</span><Seg small options={HDR_STATES} value={s.hdr} onChange={v => p.update('hdr', v, 'HDR → ' + (HDR_STATES.find(x => x.id === v)?.label))} /></div>
+      <div className="qrow"><span className="qlab">Max. Dateigröße</span><Seg small options={MAXSIZE} value={s.maxSize} onChange={v => p.update('maxSize', v, 'Max-Größe → ' + (v ? v + ' GB' : 'aus'))} /></div>
+
+      <h3>Erweiterte Qualität</h3>
+      {CODECS.map(c => <div className="qrow" key={c.id}><span className="qlab">{c.flag} {c.label}</span><Seg small options={CODEC_STATES} value={s.codecStates[c.id]} onChange={st => p.setCodec(c.id, st)} /></div>)}
+      <div className="qrow"><span className="qlab">🎬 Remux bevorzugen</span><Seg small options={REMUX_STATES} value={s.remux ? 'yes' : 'no'} onChange={v => p.update('remux', v === 'yes', 'Remux → ' + (v === 'yes' ? 'bevorzugt' : 'egal'))} /></div>
+      <label className="prof-label" style={{ marginTop: 12 }}>🚫 Release-Gruppen Blacklist (kommagetrennt)</label>
+      <textarea className="prof-select bl-input" rows={2} placeholder="z. B. YIFY, RARBG, EVO" value={s.blacklist} onChange={e => p.update('blacklist', e.target.value, 'Blacklist geändert')} />
+
+      <p className="hint">Innerhalb der Spanne wird die beste Qualität bevorzugt. Max-Größe & Blacklist lehnen passende Releases ab.</p>
+
+      <Preview settings={s} />
+
+      <div className="summary"><b>{profName}</b> · <b>{qLabelOf(s.minTier, s.maxTier)}</b>{s.hdr === 'pref' ? ' · HDR bevorzugt' : s.hdr === 'no' ? ' · ohne HDR' : ''}{s.maxSize > 0 ? ' · max ' + s.maxSize + ' GB' : ''}{s.remux ? ' · Remux' : ''}</div>
+
+      <History history={p.history} onUndo={p.undo} />
+
+      <button className="save" onClick={p.save} disabled={busy || p.sel == null}>{busy ? '…' : '💾  Speichern & aktivieren'}</button>
       <div className={'status ' + status.kind}>{status.text}</div>
     </section>
+  )
+}
+
+// ---------- Profil-Vergleich ----------
+function ProfileCompare({ a, b }) {
+  const da = describeSettings(a.settings), db = describeSettings(b.settings)
+  return (
+    <section className="card compare-card">
+      <div className="card-head"><span className="emoji">⚖️</span><h2>Profil-Vergleich</h2></div>
+      <div className="cmp-grid">
+        <div className="cmp-h">Einstellung</div>
+        <div className="cmp-h">🎬 {a.profName || 'Filme'}</div>
+        <div className="cmp-h">📺 {b.profName || 'Serien'}</div>
+        {da.map((row, i) => {
+          const diff = row.v !== db[i].v
+          return (
+            <React.Fragment key={i}>
+              <div className={'cmp-k' + (diff ? ' diff' : '')}>{row.k}</div>
+              <div className={'cmp-v' + (diff ? ' diff' : '')}>{row.v}</div>
+              <div className={'cmp-v' + (diff ? ' diff' : '')}>{db[i].v}</div>
+            </React.Fragment>
+          )
+        })}
+      </div>
+      <p className="hint">Gelb markierte Zeilen unterscheiden sich zwischen Filme- und Serien-Profil.</p>
+    </section>
+  )
+}
+
+// ---------- Import / Export ----------
+function exportSettings(a, b) {
+  const data = {
+    app: 'mediastack-regler', version: 1, exportedAt: new Date().toISOString(),
+    radarr: { profile: a.profName, settings: a.settings },
+    sonarr: { profile: b.profName, settings: b.settings },
+  }
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob); const el = document.createElement('a')
+  el.href = url; el.download = `regler-einstellungen-${new Date().toISOString().slice(0, 10)}.json`
+  document.body.appendChild(el); el.click(); el.remove(); URL.revokeObjectURL(url)
+  toast('📤 Einstellungen exportiert (JSON heruntergeladen)', 'ok')
+}
+function importSettings(file, a, b) {
+  const reader = new FileReader()
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result)
+      if (data.radarr?.settings) a.importSettings(data.radarr.settings)
+      if (data.sonarr?.settings) b.importSettings(data.sonarr.settings)
+      toast('📥 Importiert – zum Übertragen je „Speichern & aktivieren" klicken', 'info', 6000)
+    } catch (e) { toast('⚠️ Import fehlgeschlagen: ' + e.message, 'err', 6000) }
+  }
+  reader.readAsText(file)
+}
+
+// ---------- Einstellungs-Ansicht: hält beide Panels + globale Aktionen ----------
+function SettingsView() {
+  const radarr = usePanelState(APPS[0])
+  const sonarr = usePanelState(APPS[1])
+  const fileRef = React.useRef(null)
+  return (
+    <>
+      <div className="settings-toolbar">
+        <span className="tb-label">Einstellungen sichern / übertragen:</span>
+        <button className="mini-btn" onClick={() => exportSettings(radarr, sonarr)}>📤 Exportieren (JSON)</button>
+        <button className="mini-btn" onClick={() => fileRef.current?.click()}>📥 Importieren</button>
+        <input ref={fileRef} type="file" accept="application/json,.json" style={{ display: 'none' }} onChange={e => { if (e.target.files[0]) importSettings(e.target.files[0], radarr, sonarr); e.target.value = '' }} />
+      </div>
+      <div className="grid">
+        <Panel p={radarr} peer={sonarr} />
+        <Panel p={sonarr} peer={radarr} />
+      </div>
+      <ProfileCompare a={radarr} b={sonarr} />
+    </>
   )
 }
 
@@ -648,7 +920,7 @@ export default function App() {
           <p>Pro <b>Filme</b> &amp; <b>Serien</b> und pro <b>Profil</b>: Sprachen, Qualität, HDR und Maximal-Größe. Speichern – sofort live.</p>
         </div>
       </header>
-      {view === 'settings' && <main className="grid">{APPS.map(a => <Panel key={a.id} app={a} />)}</main>}
+      {view === 'settings' && <main><SettingsView /></main>}
       {view === 'status' && <main><Status /></main>}
       {view === 'search' && <main><SearchTab /></main>}
       <footer>
@@ -656,6 +928,7 @@ export default function App() {
         <div className="made">MediaStack Regler · lokal auf deinem Laptop</div>
       </footer>
       {aiOpen && <AISettings onClose={() => setAiOpen(false)} />}
+      <ToastHost />
     </div>
   )
 }

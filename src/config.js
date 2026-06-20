@@ -8,14 +8,15 @@ export const cfPrefName = id => `Regler ${id} Bonus`
 export const LEGACY_CFS = ['DE+EN Audio (German DL)', 'Regler: Sprache Pflicht', 'Regler: Sprache Bonus']
 
 // Auswaehlbare Sprachen. token = Regex-Bausteine (wie diese Sprache in Release-Titeln auftaucht).
+// sample = wie die Sprache in einem Beispiel-Dateinamen geschrieben wird (fuer die Live-Vorschau).
 export const LANGUAGES = [
-  { id: 'de',    label: 'Deutsch',     flag: '🇩🇪', token: 'german|deutsch|ger[\\.\\- ]?dl', detect: 'german' },
-  { id: 'en',    label: 'Englisch',    flag: '🇬🇧', token: 'english|\\beng\\b|.', detect: 'english' },
-  { id: 'multi', label: 'MULTi',       flag: '🌐', token: 'multi',                          detect: 'multi' },
-  { id: 'dual',  label: 'Dual Audio',  flag: '🔊', token: 'dual',                           detect: 'dual' },
-  { id: 'fr',    label: 'Franzoesisch',flag: '🇫🇷', token: 'french|truefrench|vostfr',       detect: 'french' },
-  { id: 'es',    label: 'Spanisch',    flag: '🇪🇸', token: 'spanish|castellano|espanol',     detect: 'spanish' },
-  { id: 'it',    label: 'Italienisch', flag: '🇮🇹', token: 'italian|\\bita\\b',              detect: 'italian' },
+  { id: 'de',    label: 'Deutsch',     flag: '🇩🇪', token: 'german|deutsch|ger[\\.\\- ]?dl', detect: 'german',  sample: 'German' },
+  { id: 'en',    label: 'Englisch',    flag: '🇬🇧', token: 'english|\\beng\\b|.', detect: 'english', sample: 'English' },
+  { id: 'multi', label: 'MULTi',       flag: '🌐', token: 'multi',                          detect: 'multi',   sample: 'MULTi' },
+  { id: 'dual',  label: 'Dual Audio',  flag: '🔊', token: 'dual',                           detect: 'dual',    sample: 'DUAL' },
+  { id: 'fr',    label: 'Französisch', flag: '🇫🇷', token: 'french|truefrench|vostfr',       detect: 'french',  sample: 'FRENCH' },
+  { id: 'es',    label: 'Spanisch',    flag: '🇪🇸', token: 'spanish|castellano|espanol',     detect: 'spanish', sample: 'Spanish' },
+  { id: 'it',    label: 'Italienisch', flag: '🇮🇹', token: 'italian|\\bita\\b',              detect: 'italian', sample: 'iTALiAN' },
 ]
 
 export const STATES = [
@@ -56,6 +57,34 @@ export const MAXSIZE = [
 export const CF_HDR = 'Regler HDR'
 export const cfMaxName = id => `Regler ${id} MaxGroesse`
 export const HDR_REGEX = '(?i)(hdr10\\+|hdr10|\\bhdr\\b|dolby.?vision|\\bdovi\\b|\\bdv\\b)'
+
+// ---------- Erweiterte Qualitaets-Optionen ----------
+// Codec-Praeferenz: pro Codec ein eigenes Custom Format mit Bonus/Malus-Score.
+export const CODECS = [
+  { id: 'x265', label: 'x265 / HEVC', flag: '🎞️', token: 'x265|h\\.?265|hevc',  sample: 'x265' },
+  { id: 'x264', label: 'x264 / AVC',  flag: '📼', token: 'x264|h\\.?264|\\bavc\\b', sample: 'x264' },
+  { id: 'av1',  label: 'AV1',         flag: '🆕', token: '\\bav1\\b',            sample: 'AV1' },
+]
+export const CODEC_STATES = [
+  { id: 'pref', label: 'Bevorzugt' },
+  { id: 'off',  label: 'Egal' },
+  { id: 'no',   label: 'Nicht' },
+]
+export const REMUX_STATES = [
+  { id: 'yes', label: 'Bevorzugt' },
+  { id: 'no',  label: 'Egal' },
+]
+export const cfCodecName = (id, codec) => `Regler ${id} Codec ${codec}`
+export const cfRemuxName = id => `Regler ${id} Remux`
+export const cfBlacklistName = id => `Regler ${id} Blacklist`
+export const CODEC_REGEX = c => `(?i)(${CODECS.find(x => x.id === c).token})`
+export const REMUX_REGEX = '(?i)(remux)'
+
+// Sonderzeichen fuer den Blacklist-Regex entschaerfen (Release-Gruppen sind frei eingegeben).
+export function escapeRegex(s = '') { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }
+export function blacklistRegex(groups = []) { return groups.length ? `(?i)(${groups.map(escapeRegex).join('|')})` : '' }
+// Default-Werte fuer die erweiterten Optionen (zentral, damit Hook + Import identisch sind).
+export const CODEC_DEFAULT = () => Object.fromEntries(CODECS.map(c => [c.id, 'off']))
 
 // HDR / Format-Erkennung aus dem Titel
 export function detectHDR(title = '') {
