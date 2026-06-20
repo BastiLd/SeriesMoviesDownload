@@ -41,7 +41,7 @@ export async function deleteByName(app, name) {
   try { const list = await api(app, '/api/v3/customformat'); const cf = list.find(c => c.name === name); if (cf) await api(app, `/api/v3/customformat/${cf.id}`, { method: 'DELETE' }) } catch (e) {}
 }
 
-export async function applySettings(app, profileId, { langStates, minTier, maxTier, hdr, maxSize, codecStates = {}, remux = false, blacklist = '' }) {
+export async function applySettings(app, profileId, { langStates, minTier, maxTier, hdr, maxSize, codecStates = {}, remux = false, blacklist = '', acceptAllLang = true }) {
   const reqName = cfReqName(profileId), prefName = cfPrefName(profileId), maxName = cfMaxName(profileId)
   const required = LANGUAGES.filter(l => langStates[l.id] === 'required')
   const preferred = LANGUAGES.filter(l => langStates[l.id] === 'preferred')
@@ -74,7 +74,9 @@ export async function applySettings(app, profileId, { langStates, minTier, maxTi
   }
   if (highId != null) p.cutoff = highId
   p.upgradeAllowed = true
-  p.minFormatScore = required.length ? 100 : 0
+  // acceptAllLang: Pflicht-Sprache wird NUR als starker Bonus gewertet, NICHT als harte Titel-Ablehnung
+  // (Sonarr/Radarr filtern den Audio-Track, nicht den Dateinamen). Aus → klassische harte Pflicht.
+  p.minFormatScore = (required.length && !acceptAllLang) ? 100 : 0
   const hdrScore = hdr === 'pref' ? 25 : hdr === 'no' ? -25 : 0
   const codecScoreName = {}
   for (const c of CODECS) codecScoreName[cfCodecName(profileId, c.id)] = codecStates[c.id] === 'pref' ? 15 : codecStates[c.id] === 'no' ? -15 : 0
@@ -97,7 +99,12 @@ export async function loadSettings(app, profileId) {
   const valOf = name => { const c = cfs.find(x => x.name === name); return (c?.specifications?.[0]?.fields?.find(f => f.name === 'value')?.value || '').toLowerCase() }
   const reqVal = valOf(cfReqName(profileId)), prefVal = valOf(cfPrefName(profileId))
   const hasOwn = cfs.some(c => c.name === cfReqName(profileId) || c.name === cfPrefName(profileId))
-  const required = p.minFormatScore > 0
+  // Pflicht-Sprache wird am Pflicht-CF-Score (100) erkannt – unabhängig von minFormatScore,
+  // damit die Unterscheidung auch bei acceptAllLang (minFormatScore=0) erhalten bleibt.
+  const reqScore = (p.formatItems || []).find(f => f.name === cfReqName(profileId))?.score || 0
+  const required = reqScore >= 100 || p.minFormatScore > 0
+  // acceptAllLang: Pflicht vorhanden, aber kein harter minFormatScore → Titel-Sprache wird ignoriert
+  const acceptAllLang = required ? p.minFormatScore === 0 : true
   const langStates = {}
   for (const l of LANGUAGES) {
     if (reqVal.includes(l.detect) && required) langStates[l.id] = 'required'
@@ -127,5 +134,5 @@ export async function loadSettings(app, profileId) {
     const v = blCF.specifications?.[0]?.fields?.find(f => f.name === 'value')?.value || ''
     blacklist = v.replace(/^\(\?i\)\(?/, '').replace(/\)$/, '').split('|').map(s => s.replace(/\\(.)/g, '$1').trim()).filter(Boolean).join(', ')
   }
-  return { langStates, minTier, maxTier, hdr, maxSize, codecStates, remux, blacklist }
+  return { langStates, minTier, maxTier, hdr, maxSize, codecStates, remux, blacklist, acceptAllLang }
 }

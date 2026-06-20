@@ -27,29 +27,34 @@ function seasonOf(title = '') {
 }
 
 // ---------- Download-Status korrekt erkennen ----------
-// Kategorien: active (lädt) · queue (wartet) · meta (Metadaten) · done (fertig) · problem (wirklich fehlend/Fehler)
+// Kategorien: active (lädt) · queue (wartet) · check (wird geprüft) · paused · done · problem (Fehler)
 const CATS = {
   active:  { icon: '🟢', label: 'Lädt aktiv' },
   queue:   { icon: '🟡', label: 'Warteschlange' },
-  meta:    { icon: '🔵', label: 'Metadaten' },
+  check:   { icon: '🔵', label: 'Wird geprüft' },
+  paused:  { icon: '⏸️', label: 'Pausiert' },
   done:    { icon: '✅', label: 'Fertig' },
-  problem: { icon: '🔴', label: 'Problem' },
+  problem: { icon: '🔴', label: 'Fehler' },
 }
-const DONE_STATES = ['uploading', 'stalledup', 'queuedup', 'forcedup', 'checkingup', 'pausedup', 'completed', 'seeding']
-const PROBLEM_STATES = ['error', 'missingfiles', 'unknown', 'failed', 'pauseddl', 'paused']
-const QUEUE_STATES = ['queueddl', 'stalleddl', 'checkingdl', 'allocating', 'checkingresumedata', 'moving', 'queued', 'delay']
+// Reihenfolge für Chips/Icons
+const CAT_ORDER = ['active', 'queue', 'check', 'paused', 'done', 'problem']
+// qBittorrent-States exakt gemäß API-Doku zuordnen
+const DONE_STATES    = ['uploading', 'stalledup', 'queuedup', 'forcedup', 'pausedup', 'completed', 'seeding']
+const QUEUE_STATES   = ['queueddl', 'stalleddl', 'metadl', 'allocating', 'queued', 'delay', 'forceddl']
+const CHECK_STATES   = ['checkingdl', 'checkingup', 'checkingresumedata', 'moving']
+const PAUSED_STATES  = ['pauseddl', 'stoppeddl', 'stopped']
+const PROBLEM_STATES = ['error', 'missingfiles', 'unknown']
 
-// Kernlogik: ein Torrent mit 0 Seeds/Peers/Speed WARTET (sequenzieller Download) – das ist KEIN Fehler.
-function classifyState(state, { speed = 0, prog = 0, seeds = 0, leech = 0 } = {}) {
+// Kernlogik: ein wartender Torrent (queuedDL/stalledDL/metaDL …) ist KEIN Fehler, sondern „Warteschlange".
+function classifyState(state, { speed = 0, prog = 0 } = {}) {
   const st = String(state || '').toLowerCase()
   if (prog >= 1) return 'done'
   if (DONE_STATES.includes(st)) return 'done'
-  if (st === 'metadl') return 'meta'
-  if (speed > 0) return 'active'
+  if (CHECK_STATES.includes(st)) return 'check'
+  if (PAUSED_STATES.includes(st)) return 'paused'
   if (PROBLEM_STATES.includes(st)) return 'problem'
-  if (QUEUE_STATES.includes(st) || st.includes('queue')) return 'queue'
-  // 0 Seeds + 0 Peers + 0 Speed, aber kein Fehler-State → wartet in Warteschlange
-  if (seeds === 0 && leech === 0 && speed === 0) return 'queue'
+  if (st === 'downloading' || st === 'forceddl') return speed > 0 ? 'active' : 'queue'
+  if (QUEUE_STATES.includes(st) || st.includes('queue') || st.includes('stalled') || st.includes('dl')) return 'queue'
   return 'queue'
 }
 
@@ -141,9 +146,21 @@ function Seg({ options, value, onChange, small }) {
   return <div className={'seg' + (small ? ' small' : '')}>{options.map(o => <button key={o.id} className={'seg-btn ' + o.id + (value === o.id ? ' on' : '')} onClick={() => onChange(o.id)} title={o.hint || ''}>{o.label}</button>)}</div>
 }
 function Bar({ pct }) { return <div className="bar"><div className="bar-fill" style={{ width: Math.round(pct) + '%' }} /></div> }
+function Spinner({ label }) { return <span className="spinner-wrap"><span className="spinner" />{label && <span className="spinner-lbl">{label}</span>}</span> }
+function Toggle({ on, onChange, label, hint }) {
+  return (
+    <button type="button" className={'toggle-row' + (on ? ' on' : '')} onClick={() => onChange(!on)} title={hint || ''}>
+      <span className="toggle-track"><span className="toggle-knob" /></span>
+      <span className="toggle-label">{label}{hint && <span className="toggle-hint">{hint}</span>}</span>
+    </button>
+  )
+}
 
 // ---------- Helfer fuer die Einstellungen ----------
-const SETTINGS_DEFAULT = () => ({ langStates: Object.fromEntries(LANGUAGES.map(l => [l.id, 'off'])), minTier: 1080, maxTier: 2160, hdr: 'off', maxSize: 0, codecStates: CODEC_DEFAULT(), remux: false, blacklist: '' })
+// acceptAllLang (Standard AN): Releases werden NICHT wegen der Sprache im Dateinamen abgelehnt
+//   (Sonarr/Radarr filtern den Audio-Track, nicht den Titel).
+// ignoreTitleLang (Standard AN): reine Anzeige – blendet Sprach-Ablehnungen in der Vorschau aus.
+const SETTINGS_DEFAULT = () => ({ langStates: Object.fromEntries(LANGUAGES.map(l => [l.id, 'off'])), minTier: 1080, maxTier: 2160, hdr: 'off', maxSize: 0, codecStates: CODEC_DEFAULT(), remux: false, blacklist: '', acceptAllLang: true, ignoreTitleLang: true })
 function normalizeSettings(s = {}) { const d = SETTINGS_DEFAULT(); return { ...d, ...s, langStates: { ...d.langStates, ...(s.langStates || {}) }, codecStates: { ...d.codecStates, ...(s.codecStates || {}) } } }
 function qLabelOf(min, max) { return min === max ? (min === 2160 ? 'nur 4K' : 'nur ' + min + 'p') : `${min}p–${max === 2160 ? '4K' : max + 'p'}` }
 function tierLabel(t) { return t === 2160 ? '2160p' : t === 1080 ? '1080p' : t === 720 ? '720p' : '480p' }
@@ -162,20 +179,29 @@ function buildPreview(s) {
   const req = LANGUAGES.filter(l => s.langStates[l.id] === 'required')
   const prefCodec = CODECS.find(c => s.codecStates[c.id] === 'pref')
   const noCodecs = CODECS.filter(c => s.codecStates[c.id] === 'no')
-  const langPart = req.length ? req.map(l => l.sample).join('.') : 'German'
   const codecPart = prefCodec ? prefCodec.sample : 'x265'
   const base = 'The.Mentalist.S01E01'
-  const accepted = [`${base}.${tierLabel(s.maxTier)}.BluRay.${langPart}.${codecPart}.mkv`]
-  if (s.remux) accepted.push(`${base}.${tierLabel(s.maxTier)}.BluRay.REMUX.${langPart}.${codecPart}.mkv`)
+  // Effektiv ignoriert: wenn EINER der beiden Toggles an ist, wird die Titel-Sprache nicht geprüft
+  const ignoreLang = !!(s.acceptAllLang || s.ignoreTitleLang)
+  const langNote = ignoreLang ? ' (Sprache im Dateinamen wird ignoriert)' : ''
+  const accepted = [
+    { name: `${base}.${tierLabel(s.maxTier)}.BluRay.German.${codecPart}.mkv`, note: langNote },
+    { name: `${base}.${tierLabel(s.maxTier)}.BluRay.English.${codecPart}.mkv`, note: ignoreLang ? langNote : (req.some(l => l.id === 'en') || !req.length ? langNote : '') },
+  ]
+  if (s.remux) accepted.push({ name: `${base}.${tierLabel(s.maxTier)}.BluRay.REMUX.MULTi.${codecPart}.mkv`, note: ' · Remux-Bonus' })
   const rejected = []
-  if (req.length) rejected.push({ name: `${base}.${tierLabel(s.maxTier)}.BluRay.English.${codecPart}.mkv`, reason: `fehlt: ${req.map(l => l.label).join(' + ')}` })
-  if (s.minTier > 720) rejected.push({ name: `${base}.720p.WEB.${langPart}.${codecPart}.mkv`, reason: `Qualität unter ${tierLabel(s.minTier)}` })
-  if (s.maxTier < 2160) rejected.push({ name: `${base}.2160p.BluRay.${langPart}.${codecPart}.mkv`, reason: 'über Max-Qualität (4K)' })
-  if (s.hdr === 'no') rejected.push({ name: `${base}.${tierLabel(s.maxTier)}.BluRay.HDR.${langPart}.${codecPart}.mkv`, reason: 'HDR ausgeschlossen' })
-  for (const c of noCodecs) rejected.push({ name: `${base}.${tierLabel(s.maxTier)}.BluRay.${langPart}.${c.sample}.mkv`, reason: `Codec ${c.label} nicht erwünscht` })
+  // Sprach-Ablehnung NUR wenn beide Toggles AUS sind (echte harte Sprach-Pflicht auf den Titel)
+  if (!ignoreLang && req.length) {
+    const other = LANGUAGES.find(l => !req.includes(l) && l.id !== 'en') || LANGUAGES.find(l => !req.includes(l))
+    rejected.push({ name: `${base}.${tierLabel(s.maxTier)}.BluRay.${other?.sample || 'VOSTFR'}.${codecPart}.mkv`, reason: `Pflicht-Sprache fehlt: ${req.map(l => l.label).join(' + ')}` })
+  }
+  if (s.minTier > 720) rejected.push({ name: `${base}.720p.WEB.German.${codecPart}.mkv`, reason: `Qualität unter ${tierLabel(s.minTier)}` })
+  if (s.maxTier < 2160) rejected.push({ name: `${base}.2160p.BluRay.German.${codecPart}.mkv`, reason: 'über Max-Qualität (4K)' })
+  if (s.hdr === 'no') rejected.push({ name: `${base}.${tierLabel(s.maxTier)}.BluRay.HDR.German.${codecPart}.mkv`, reason: 'HDR ausgeschlossen' })
+  for (const c of noCodecs) rejected.push({ name: `${base}.${tierLabel(s.maxTier)}.BluRay.German.${c.sample}.mkv`, reason: `Codec ${c.label} nicht erwünscht` })
   const blGroups = String(s.blacklist || '').split(',').map(x => x.trim()).filter(Boolean)
-  if (blGroups.length) rejected.push({ name: `${base}.${tierLabel(s.maxTier)}.BluRay.${langPart}.${codecPart}-${blGroups[0]}.mkv`, reason: `Release-Gruppe „${blGroups[0]}" blockiert` })
-  if (s.maxSize > 0) rejected.push({ name: `${base}.2160p.BluRay.REMUX.${langPart}.${codecPart}.mkv`, reason: `größer als ${s.maxSize} GB` })
+  if (blGroups.length) rejected.push({ name: `${base}.${tierLabel(s.maxTier)}.BluRay.German.${codecPart}-${blGroups[0]}.mkv`, reason: `Release-Gruppe „${blGroups[0]}" blockiert` })
+  if (s.maxSize > 0) rejected.push({ name: `${base}.2160p.BluRay.REMUX.German.${codecPart}.mkv`, reason: `größer als ${s.maxSize} GB` })
   return { accepted, rejected: rejected.slice(0, 5) }
 }
 
@@ -232,9 +258,11 @@ function usePanelState(app) {
 
   const save = async () => {
     const mx = settings.maxTier < settings.minTier ? settings.minTier : settings.maxTier
+    // Effektiv: einer der beiden Sprach-Toggles reicht, um die Titel-Sprache nicht hart zu filtern
+    const effAcceptAll = !!(settings.acceptAllLang || settings.ignoreTitleLang)
     setBusy(true); setStatus({ text: 'speichere…', kind: 'info' })
     try {
-      await applySettings(app, sel, { ...settings, maxTier: mx })
+      await applySettings(app, sel, { ...settings, maxTier: mx, acceptAllLang: effAcceptAll })
       const t = Date.now(); setLastSaved(t); localStorage.setItem(savedKey(sel), String(t))
       setStatus({ text: 'Gespeichert – sofort aktiv ✓', kind: 'ok' }); setDirty(false); setLastChange(null)
       toast(`✅ ${app.title}: Gespeichert und an ${app.id === 'radarr' ? 'Radarr' : 'Sonarr'} übertragen`, 'ok')
@@ -257,8 +285,9 @@ function Preview({ settings }) {
   return (
     <div className="preview">
       <div className="prev-head">👁️ Live-Vorschau – was diese Regeln bedeuten</div>
-      {accepted.map((n, i) => <div className="prev-row ok" key={'a' + i}><span className="prev-mark">✅</span><code>{n}</code><span className="prev-tag">würde akzeptiert</span></div>)}
+      {accepted.map((a, i) => <div className="prev-row ok" key={'a' + i}><span className="prev-mark">✅</span><code>{a.name}</code><span className="prev-tag">würde akzeptiert{a.note}</span></div>)}
       {rejected.map((r, i) => <div className="prev-row no" key={'r' + i}><span className="prev-mark">❌</span><code>{r.name}</code><span className="prev-tag">{r.reason}</span></div>)}
+      {settings.acceptAllLang && <p className="hint" title="Sonarr/Radarr prüfen den Audio-Track, nicht den Dateinamen">🌐 Sprache im Dateinamen wird ignoriert – jedes Release wird unabhängig vom Sprach-Tag im Titel akzeptiert.</p>}
       {rejected.length === 0 && <p className="hint">Sehr offene Regeln – fast alles würde akzeptiert.</p>}
     </div>
   )
@@ -313,6 +342,10 @@ function Panel({ p, peer }) {
 
       <h3>Sprachen</h3>
       <div className="langs">{LANGUAGES.map(l => <div className="lang-row" key={l.id}><span className="lang-name"><span className="flag">{l.flag}</span>{l.label}</span><Seg small options={STATES} value={s.langStates[l.id]} onChange={st => p.setLang(l.id, st)} /></div>)}</div>
+      <div className="lang-toggles">
+        <Toggle on={s.acceptAllLang} onChange={v => p.update('acceptAllLang', v, '„Jede Sprache akzeptieren" → ' + (v ? 'an' : 'aus'))} label="🌐 Jede Sprache im Dateinamen akzeptieren" hint={'Releases werden anhand des Audio-Tracks gefiltert, nicht des Dateinamens. Ein Release namens „English.mkv“ wird nicht abgelehnt.'} />
+        <Toggle on={s.ignoreTitleLang} onChange={v => p.update('ignoreTitleLang', v, '„Sprache im Titel ignorieren" → ' + (v ? 'an' : 'aus'))} label="🌍 Sprache im Dateinamen/Titel ignorieren (empfohlen)" hint="Sonarr/Radarr prüfen den Audio-Track, nicht den Dateinamen." />
+      </div>
 
       <h3>Qualität</h3>
       <div className="qrow"><span className="qlab">Mindestens</span><Seg small options={QUALITY_MIN} value={s.minTier} onChange={v => p.update('minTier', v, 'Min-Qualität → ' + tierLabel(v))} /></div>
@@ -434,11 +467,12 @@ const FILTERS = [
   { id: 'done', label: '✅ Fertig' },
 ]
 // welche Download-Kategorien zeigt ein Filter?
-const FILTER_CATS = { active: ['active'], queue: ['queue', 'meta'], done: ['done'], missing: ['problem'] }
+const FILTER_CATS = { active: ['active'], queue: ['queue', 'check'], done: ['done'], missing: ['problem', 'paused'] }
 
+const CAT_WORD = { active: 'aktiv', queue: 'wartend', check: 'wird geprüft', paused: 'pausiert', done: 'fertig', problem: 'Fehler' }
 function StatChip({ cat, n }) {
   if (!n) return null
-  return <span className={'stat-chip ' + cat}>{CATS[cat].icon} {n}</span>
+  return <span className={'stat-chip ' + cat}>{CATS[cat].icon} {n} {CAT_WORD[cat]}</span>
 }
 
 function Status() {
@@ -452,24 +486,35 @@ function Status() {
   const [search, setSearch] = useState('')
   const [lastUpdate, setLastUpdate] = useState(null)
   const [flash, setFlash] = useState(false)
+  const [srcErr, setSrcErr] = useState({})   // { radarr/sonarr/qbt: true } bei Verbindungsproblem
 
   const load = async () => {
+    const errs = {}
+    const getJ = async (url, key, fallback) => {
+      try { const r = await fetch(url, key ? { headers: { 'X-Api-Key': key } } : undefined); if (!r.ok) throw 0; return await r.json() }
+      catch { errs[url.split('/')[1]] = true; return fallback }
+    }
     try {
-      const h = k => ({ headers: { 'X-Api-Key': k } })
       const [rq, sq, rm, sm, qbt] = await Promise.all([
-        fetch('/radarr/api/v3/queue?pageSize=200', h(RADARR_KEY)).then(r => r.json()).catch(() => ({ records: [] })),
-        fetch('/sonarr/api/v3/queue?pageSize=200', h(SONARR_KEY)).then(r => r.json()).catch(() => ({ records: [] })),
-        fetch('/radarr/api/v3/wanted/missing?pageSize=500', h(RADARR_KEY)).then(r => r.json()).catch(() => ({ records: [], totalRecords: 0 })),
-        fetch('/sonarr/api/v3/wanted/missing?pageSize=500', h(SONARR_KEY)).then(r => r.json()).catch(() => ({ records: [], totalRecords: 0 })),
-        fetch('/qbt/api/v2/torrents/info').then(r => r.json()).catch(() => []),
+        getJ('/radarr/api/v3/queue?pageSize=200', RADARR_KEY, { records: [] }),
+        getJ('/sonarr/api/v3/queue?pageSize=200', SONARR_KEY, { records: [] }),
+        getJ('/radarr/api/v3/wanted/missing?pageSize=500', RADARR_KEY, { records: [], totalRecords: 0 }),
+        getJ('/sonarr/api/v3/wanted/missing?pageSize=500&includeSeries=true', SONARR_KEY, { records: [], totalRecords: 0 }),
+        getJ('/qbt/api/v2/torrents/info', null, []),
       ])
       const queue = [...(rq.records || []).map(x => ({ ...x, kind: '🎬', appId: 'radarr' })), ...(sq.records || []).map(x => ({ ...x, kind: '📺', appId: 'sonarr' }))]
-      setD({ queue, torrents: qbt || [], missR: rm, missS: sm }); setErr(null)
+      setSrcErr(errs)
+      setD({ queue, torrents: Array.isArray(qbt) ? qbt : [], missR: rm, missS: sm }); setErr(null)
       setLastUpdate(new Date()); setFlash(true); setTimeout(() => setFlash(false), 700)
     } catch (e) { setErr(e.message) }
   }
   useEffect(() => { load(); const t = setInterval(load, interval); return () => clearInterval(t) }, [interval])
   useEffect(() => { localStorage.setItem('regler-refresh', String(interval)) }, [interval])
+  // Ctrl+R = manueller Refresh (statt Seiten-Neuladen)
+  useEffect(() => {
+    const onKey = e => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'r') { e.preventDefault(); load() } }
+    window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   const why = async (appId, item, hasTorrent) => {
     const title = item.title || `${item.series?.title} S${String(item.seasonNumber).padStart(2, '0')}E${String(item.episodeNumber).padStart(2, '0')}`
@@ -485,11 +530,12 @@ function Status() {
     } catch (e) { setModal({ title: 'Fehler', loading: false, why: e.message, fix: '', reasons: [] }) }
   }
   const searchNow = async (appId, item) => {
+    setModal(m => ({ ...m, searching: true }))
     try {
       const app = appById(appId)
       const body = appId === 'radarr' ? `{"name":"MoviesSearch","movieIds":[${item.id}]}` : `{"name":"EpisodeSearch","episodeIds":[${item.id}]}`
-      await api(app, '/api/v3/command', { method: 'POST', body }); setModal(m => ({ ...m, searched: true }))
-    } catch (e) { setModal(m => ({ ...m, why: 'Suche-Fehler: ' + e.message })) }
+      await api(app, '/api/v3/command', { method: 'POST', body }); setModal(m => ({ ...m, searching: false, searched: true })); toast('🔍 Suche gestartet – schau bei „Aktive Downloads"', 'ok')
+    } catch (e) { setModal(m => ({ ...m, searching: false, why: 'Suche-Fehler: ' + e.message })) }
   }
   const askAI = async () => {
     const m0 = modal
@@ -501,28 +547,37 @@ function Status() {
     } catch (e) { setModal(m => ({ ...m, aiBusy: false, aiAnswer: '⚠️ KI-Fehler: ' + e.message + '  (Läuft Ollama? Modell installiert? Bei „localhost" muss Ollama auf diesem PC laufen – sonst in 🧠 KI-Einstellungen die Server-Adresse setzen.)' })) }
   }
 
-  // ----- Download-Reihen aus qBittorrent (+ ergänzend *arr-Queue) bauen -----
+  // ----- Download-Reihen: qBittorrent ist die QUELLE DER WAHRHEIT (echter progress/dlspeed) -----
   const torrents = d?.torrents || []
   const rows = []
   torrents.forEach(t => {
-    const seeds = t.num_seeds ?? t.numSeeds ?? 0
-    const leech = t.num_leechs ?? t.numLeechs ?? 0
     const speed = t.dlspeed || 0
     const prog = t.progress || 0
     const sizeleft = t.amount_left != null ? t.amount_left : (t.size || 0) * (1 - prog)
     rows.push({
       key: t.hash, label: t.name, prog, speed, state: t.state, size: t.size || 0, sizeleft,
-      eta: t.eta, seeds, leech, priority: t.priority || 0,
-      cat: classifyState(t.state, { speed, prog, seeds, leech }),
+      eta: t.eta, seeds: t.num_seeds ?? t.numSeeds ?? 0, leech: t.num_leechs ?? t.numLeechs ?? 0, priority: t.priority || 0,
+      cat: classifyState(t.state, { speed, prog }),
     })
   })
+  // Abdeckungs-Prüfung: ist Serie+Staffel (oder Film) schon durch einen qBittorrent-Torrent vertreten?
+  const torrentInfos = torrents.map(t => ({ n: normTitle(t.name), s: seasonOf(t.name) }))
+  const coveredByTorrent = (title, season) => {
+    const want = normTitle(title || '')
+    if (!want || want.length < 4) return false
+    return torrentInfos.some(ti => ti.n.includes(want) && (season == null || ti.s === season || (ti.s == null && /(complete|allseason|stagione|integrale|s00)/i.test(ti.n))))
+  }
+  // *arr-Queue NUR ergänzen, wenn KEIN Torrent den Eintrag abdeckt – sonst entstehen die 0%-Phantom-Zeilen
   ;(d?.queue || []).forEach(q => {
-    if (torrents.some(t => t.name === q.title || t.name.replace(/\.\w+$/, '') === q.title)) return
-    const prog = q.size > 0 ? (q.size - q.sizeleft) / q.size : 0
+    const season = q.seasonNumber != null ? q.seasonNumber : seasonOf(q.title)
+    const seriesTitle = q.series?.title || q.movie?.title || q.title
+    const titleDup = torrents.some(t => { const a = normTitle(t.name), b = normTitle(q.title || ''); return a && b && (a.includes(b) || b.includes(a)) })
+    if (titleDup || coveredByTorrent(seriesTitle, season)) return
+    const prog = q.size > 0 ? (q.size - (q.sizeleft || 0)) / q.size : 0
     rows.push({
-      key: 'q' + q.title, label: q.kind + ' ' + q.title, prog, speed: 0, state: q.status,
-      size: q.size || 0, sizeleft: q.sizeleft || 0, eta: null, seeds: 0, leech: 0, priority: 0,
-      cat: classifyState(q.status, { prog }),
+      key: 'q' + (q.downloadId || q.title), label: (q.kind || '') + ' ' + q.title, prog, speed: 0,
+      state: q.status || q.trackedDownloadState, size: q.size || 0, sizeleft: q.sizeleft || 0,
+      eta: null, seeds: 0, leech: 0, priority: 99999, cat: classifyState(q.status, { prog }),
     })
   })
 
@@ -532,13 +587,13 @@ function Status() {
   queued.forEach((r, i) => { posByKey[r.key] = i + 1 })
 
   // Gesamt-Zähler
-  const count = { active: 0, queue: 0, meta: 0, done: 0, problem: 0 }
+  const count = Object.fromEntries(CAT_ORDER.map(c => [c, 0]))
   rows.forEach(r => { count[r.cat]++ })
   const totSpeed = rows.reduce((a, r) => a + (r.speed || 0), 0)
   const totSize = rows.reduce((a, r) => a + (r.size || 0), 0)
   const totDone = rows.reduce((a, r) => a + (r.size || 0) * r.prog, 0)
   const overall = totSize > 0 ? (totDone / totSize) * 100 : 0
-  const remainBytes = rows.filter(r => r.cat === 'active' || r.cat === 'queue' || r.cat === 'meta').reduce((a, r) => a + (r.sizeleft || 0), 0)
+  const remainBytes = rows.filter(r => ['active', 'queue', 'check'].includes(r.cat)).reduce((a, r) => a + (r.sizeleft || 0), 0)
   const totETA = totSpeed > 0 ? remainBytes / totSpeed : null
 
   // Filter + Suche auf Download-Reihen
@@ -557,21 +612,15 @@ function Status() {
     const s = g.items.reduce((a, r) => a + (r.size || 0), 0)
     const dn = g.items.reduce((a, r) => a + (r.size || 0) * r.prog, 0)
     const spd = g.items.reduce((a, r) => a + (r.speed || 0), 0)
-    const left = g.items.filter(r => r.cat === 'active' || r.cat === 'queue' || r.cat === 'meta').reduce((a, r) => a + (r.sizeleft || 0), 0)
-    const c = { active: 0, queue: 0, meta: 0, done: 0, problem: 0 }
+    const left = g.items.filter(r => ['active', 'queue', 'check'].includes(r.cat)).reduce((a, r) => a + (r.sizeleft || 0), 0)
+    const c = Object.fromEntries(CAT_ORDER.map(x => [x, 0]))
     g.items.forEach(r => c[r.cat]++)
     return { pct: s > 0 ? dn / s * 100 : 0, speed: spd, eta: spd > 0 ? left / spd : null, c }
   }
 
-  // ----- fehlt: nur WIRKLICH fehlende (kein Torrent vorhanden) -----
-  // Abgleich: hat ein missing-Eintrag bereits einen passenden Torrent in qBittorrent?
-  const torrentNames = torrents.map(t => normTitle(t.name))
-  const hasTorrentFor = (titleParts) => {
-    const want = titleParts.filter(Boolean).map(normTitle)
-    return torrentNames.some(n => want.every(w => n.includes(w)))
-  }
-  const missRRecords = (d?.missR?.records || []).filter(m => !hasTorrentFor([m.title]))
-  const missSRecords = (d?.missS?.records || []).filter(m => !hasTorrentFor([m.series?.title, 'S' + String(m.seasonNumber).padStart(2, '0')]))
+  // ----- fehlt: nur WIRKLICH fehlende (kein Torrent in qBittorrent – auf Serie+Staffel-Ebene abgeglichen) -----
+  const missRRecords = (d?.missR?.records || []).filter(m => !coveredByTorrent(m.title, null))
+  const missSRecords = (d?.missS?.records || []).filter(m => !coveredByTorrent(m.series?.title, m.seasonNumber))
   const missByS = {}
   missSRecords.forEach(m => { const k = m.seasonNumber ?? 0; (missByS[k] ||= []).push(m) })
   const missSeasons = Object.keys(missByS).map(Number).sort((a, b) => a - b)
@@ -592,21 +641,25 @@ function Status() {
         <div className="filter-btns">{FILTERS.map(f => <button key={f.id} className={'filter-btn' + (filter === f.id ? ' on' : '')} onClick={() => setFilter(f.id)}>{f.label}</button>)}</div>
         <input className="filter-search" placeholder="🔍 Serie/Film suchen…" value={search} onChange={e => setSearch(e.target.value)} />
       </div>
+      {Object.keys(srcErr).length > 0 && (
+        <div className="conn-warn">⚠️ Verbindung zu {Object.keys(srcErr).map(k => ({ qbt: 'qBittorrent', radarr: 'Radarr', sonarr: 'Sonarr' }[k] || k)).join(', ')} unterbrochen – Daten möglicherweise veraltet.</div>
+      )}
       {err && <div className="card status-card"><p className="status err">Fehler: {err}</p></div>}
-      {!d && !err && <div className="card status-card"><p className="hint">lade…</p></div>}
+      {!d && !err && (
+        <div className="card status-card">
+          <div className="card-head"><span className="emoji">⬇️</span><h2>Aktive Downloads</h2></div>
+          <div className="skel skel-bar" /><div className="skel skel-row" /><div className="skel skel-row" /><div className="skel skel-row" />
+        </div>
+      )}
       {d && <>
         {showDownloads && <section className="card status-card">
           <div className="card-head"><span className="emoji">⬇️</span><h2>Aktive Downloads</h2>
             <span className="dl-totspeed">↓ {fmtSpeed(totSpeed)}</span>
           </div>
           <div className="stat-row">
-            <StatChip cat="active" n={count.active} />
-            <StatChip cat="queue" n={count.queue} />
-            <StatChip cat="meta" n={count.meta} />
-            <StatChip cat="done" n={count.done} />
-            <StatChip cat="problem" n={count.problem} />
+            {CAT_ORDER.map(c => <StatChip key={c} cat={c} n={count[c]} />)}
             {rows.length === 0 && <span className="empty">Gerade läuft kein Download.</span>}
-            {totETA != null && <span className="stat-eta">⏱ noch ca. {fmtETA(totETA)}</span>}
+            {totETA != null && <span className="stat-eta">⏱ ETA gesamt: ~{fmtETA(totETA)}</span>}
           </div>
           {rows.length > 0 && <div className="overall"><div className="overall-top"><b>Gesamt-Fortschritt</b><span className="dl-pct">{Math.round(overall)}%</span></div><Bar pct={overall} /></div>}
           {groupList.length === 0 && rows.length > 0 && <p className="empty">Keine Treffer für diesen Filter/Suche.</p>}
@@ -619,7 +672,7 @@ function Status() {
                   <span className="grp-arrow">{open ? '▾' : '▸'}</span>
                   <span className="grp-label">{g.label}</span>
                   <span className="grp-count">{g.items.length}</span>
-                  <span className="grp-icons">{['active', 'queue', 'meta', 'done', 'problem'].map(c => st.c[c] ? <span key={c} className="mini-icon">{CATS[c].icon}{st.c[c]}</span> : null)}</span>
+                  <span className="grp-icons">{CAT_ORDER.map(c => st.c[c] ? <span key={c} className="mini-icon">{CATS[c].icon}{st.c[c]}</span> : null)}</span>
                   <span className="grp-bar"><Bar pct={st.pct} /></span>
                   <span className="grp-pct">{Math.round(st.pct)}%</span>
                   <span className="grp-spd">{st.speed > 0 ? '↓ ' + fmtBytes(st.speed) + '/s' : ''}{st.eta != null ? ' · ' + fmtETA(st.eta) : ''}</span>
@@ -682,7 +735,7 @@ function Status() {
         <div className="overlay" onClick={() => setModal(null)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="modal-head"><h3>{modal.title}</h3><button className="x" onClick={() => setModal(null)}>✕</button></div>
-            {modal.loading ? <p className="hint">analysiere über alle Indexer … (max. 10s)</p> : <>
+            {modal.loading ? <div className="modal-loading"><Spinner label="analysiere über alle Indexer … (max. 10s)" /></div> : <>
               {modal.found != null && <p className="modal-stat"><b>{modal.found}</b> Releases gefunden · <b>{modal.accepted}</b> passen zu deiner Regel{modal.maxSeed != null ? ' · max. ' + modal.maxSeed + ' Seeder' : ''}</p>}
               <div className="modal-box why"><b>Warum:</b> {modal.why}</div>
               {modal.fix && <div className="modal-box fix"><b>Lösung:</b> {modal.fix}</div>}
@@ -691,7 +744,7 @@ function Status() {
               {modal.aiBusy && <div className="modal-box why">🧠 KI denkt nach…</div>}
               {modal.aiAnswer && <div className="modal-box ai"><b>🧠 KI:</b> {modal.aiAnswer}</div>}
               <div className="modal-actions">
-                {modal.appId && !modal.searched && <button className="save inline" onClick={() => searchNow(modal.appId, modal.item)}>🔍 Jetzt suchen</button>}
+                {modal.appId && !modal.searched && <button className="save inline" onClick={() => searchNow(modal.appId, modal.item)} disabled={modal.searching}>{modal.searching ? <Spinner label="suche…" /> : '🔍 Jetzt suchen'}</button>}
                 {modal.found != null && <button className="mini-btn" onClick={askAI} disabled={modal.aiBusy}>🧠 KI fragen</button>}
                 <button className="mini-btn" onClick={() => setModal(null)}>Schließen</button>
               </div>
@@ -703,32 +756,72 @@ function Status() {
   )
 }
 
+// Profil-Match-Badge aus dem von Sonarr/Radarr gelieferten rejected-Flag ableiten
+function relBadge(r) {
+  if (!r.rejected) return { cls: 'match', label: '🟢 Profil-Match', title: 'Erfüllt alle Profil-Kriterien (Qualität, Codec, Größe …)' }
+  const rj = (r.rejections || []).join(' ').toLowerCase()
+  if (rj.includes('cutoff') || rj.includes('already') || rj.includes('upgrade') || rj.includes('exists')) return { cls: 'partial', label: '🟡 Teilweise', title: (r.rejections || []).join('; ') }
+  return { cls: 'nomatch', label: '🔴 Passt nicht', title: (r.rejections || []).join('; ') }
+}
+
 function SearchTab() {
   const [appId, setAppId] = useState('radarr')
   const [items, setItems] = useState([])
   const [selId, setSelId] = useState('')
   const [season, setSeason] = useState('')
-  const [sortBy, setSortBy] = useState('quality')
+  const [sortBy, setSortBy] = useState('seeders')   // Standard: schnellster (meiste Seeder) zuerst
   const [results, setResults] = useState(null)
   const [loading, setLoading] = useState(false)
   const [msg, setMsg] = useState('')
+  const [filterText, setFilterText] = useState('')   // Freitext-Filter der Bibliothek
+  const [onlyMatch, setOnlyMatch] = useState(false)  // nur Profil-konforme anzeigen
+  const [grabbing, setGrabbing] = useState(null)     // guid des gerade geladenen Release
+  const [batch, setBatch] = useState(null)           // { running, done, total }
 
   useEffect(() => { (async () => {
     try { const a = appById(appId); const list = await api(a, appId === 'radarr' ? '/api/v3/movie' : '/api/v3/series'); list.sort((x, y) => (x.sortTitle || x.title).localeCompare(y.sortTitle || y.title)); setItems(list); setSelId(list[0]?.id ?? ''); setResults(null); setMsg('') }
     catch (e) { setMsg('Konnte Bibliothek nicht laden: ' + e.message) }
   })() }, [appId])
 
+  const q = filterText.trim().toLowerCase()
+  const shownItems = q ? items.filter(i => (i.title || '').toLowerCase().includes(q)) : items
   const cur = items.find(i => i.id === Number(selId))
   const seasons = cur?.seasons?.filter(s => s.seasonNumber > 0).map(s => s.seasonNumber) || []
   const sortRel = (arr) => arr.sort((x, y) => (Number(!!x.rejected) - Number(!!y.rejected)) || (sortBy === 'seeders' ? (y.seeders || 0) - (x.seeders || 0) : (tierOf(y.quality?.quality?.name || '') - tierOf(x.quality?.quality?.name || '')) || ((y.seeders || 0) - (x.seeders || 0))))
   const doSearch = async () => {
     setLoading(true); setResults(null); setMsg('suche über alle Indexer … (~1 Min)')
-    try { const a = appById(appId); const q = appId === 'radarr' ? `movieId=${selId}` : `seriesId=${selId}` + (season ? `&seasonNumber=${season}` : ''); const rel = await api(a, `/api/v3/release?${q}`); setResults(sortRel(rel)); setMsg(rel.length ? '' : 'Keine Treffer.') }
+    try { const a = appById(appId); const path = appId === 'radarr' ? `movieId=${selId}` : `seriesId=${selId}` + (season ? `&seasonNumber=${season}` : ''); const rel = await api(a, `/api/v3/release?${path}`); setResults(sortRel(rel)); setMsg(rel.length ? '' : 'Keine Treffer.') }
     catch (e) { setMsg('Fehler: ' + e.message) }
     setLoading(false)
   }
   useEffect(() => { if (results) setResults(r => sortRel([...r])) }, [sortBy])
-  const grab = async (r) => { try { await api(appById(appId), '/api/v3/release', { method: 'POST', body: JSON.stringify({ guid: r.guid, indexerId: r.indexerId }) }); setMsg('„' + r.title + '" wird geladen! → Downloads-Tab.') } catch (e) { setMsg('Laden fehlgeschlagen: ' + e.message) } }
+  const grab = async (r) => {
+    setGrabbing(r.guid)
+    try { await api(appById(appId), '/api/v3/release', { method: 'POST', body: JSON.stringify({ guid: r.guid, indexerId: r.indexerId }) }); setMsg('„' + r.title + '" wird geladen! → Downloads-Tab.'); toast('⬇ „' + r.title.slice(0, 50) + '…" wird geladen', 'ok') }
+    catch (e) { setMsg('Laden fehlgeschlagen: ' + e.message); toast('Laden fehlgeschlagen: ' + e.message, 'err', 6000) }
+    setGrabbing(null)
+  }
+  // Batch: alle fehlenden automatisch suchen (Sonarr/Radarr greift selbst das beste Release)
+  const batchSearch = async () => {
+    setBatch({ running: true, done: 0, total: 0 })
+    try {
+      const a = appById(appId)
+      const mm = await api(a, '/api/v3/wanted/missing?pageSize=2000')
+      const ids = (mm.records || []).map(m => m.id)
+      if (!ids.length) { setBatch(null); toast('Keine fehlenden Einträge gefunden 🎉', 'info'); return }
+      const chunk = 20
+      for (let i = 0; i < ids.length; i += chunk) {
+        const part = ids.slice(i, i + chunk)
+        const body = appId === 'radarr' ? JSON.stringify({ name: 'MoviesSearch', movieIds: part }) : JSON.stringify({ name: 'EpisodeSearch', episodeIds: part })
+        await api(a, '/api/v3/command', { method: 'POST', body })
+        setBatch({ running: true, done: Math.min(i + chunk, ids.length), total: ids.length })
+      }
+      setBatch({ running: false, done: ids.length, total: ids.length })
+      toast(`🔍 Auto-Suche für ${ids.length} fehlende ${appId === 'radarr' ? 'Filme' : 'Folgen'} gestartet`, 'ok')
+    } catch (e) { setBatch(null); toast('Batch-Suche fehlgeschlagen: ' + e.message, 'err', 6000) }
+  }
+
+  const visibleResults = (results || []).filter(r => !onlyMatch || !r.rejected)
 
   return (
     <div className="search-wrap">
@@ -736,32 +829,44 @@ function SearchTab() {
         <div className="card-head"><span className="emoji">🔎</span><h2>Manuell suchen & auswählen</h2></div>
         <div className="search-controls">
           <Seg options={[{ id: 'radarr', label: '🎬 Filme' }, { id: 'sonarr', label: '📺 Serien' }]} value={appId} onChange={setAppId} />
-          <select className="prof-select grow" value={selId} onChange={e => { setSelId(e.target.value); setSeason('') }}>{items.map(i => <option key={i.id} value={i.id}>{i.title}{i.year ? ' (' + i.year + ')' : ''}</option>)}</select>
-          {appId === 'sonarr' && seasons.length > 0 && <select className="prof-select" value={season} onChange={e => setSeason(e.target.value)}><option value="">ganze Serie</option>{seasons.map(s => <option key={s} value={s}>Staffel {s}</option>)}</select>}
-          <button className="save inline" onClick={doSearch} disabled={loading || !selId}>{loading ? 'suche…' : '🔎 Suchen'}</button>
+          <input className="filter-search" placeholder={'🔤 ' + (appId === 'radarr' ? 'Film' : 'Serie') + ' tippen zum Filtern…'} value={filterText} onChange={e => setFilterText(e.target.value)} />
         </div>
-        <div className="search-controls" style={{ marginTop: 10 }}><span className="qlab">Sortieren:</span><Seg small options={[{ id: 'quality', label: 'Beste Qualität' }, { id: 'seeders', label: 'Schnellste (Seeder)' }]} value={sortBy} onChange={setSortBy} /></div>
+        <div className="search-controls" style={{ marginTop: 10 }}>
+          <select className="prof-select grow" value={selId} onChange={e => { setSelId(e.target.value); setSeason('') }}>{shownItems.map(i => <option key={i.id} value={i.id}>{i.title}{i.year ? ' (' + i.year + ')' : ''}</option>)}</select>
+          {appId === 'sonarr' && seasons.length > 0 && <select className="prof-select" value={season} onChange={e => setSeason(e.target.value)}><option value="">ganze Serie</option>{seasons.map(s => <option key={s} value={s}>Staffel {s}</option>)}</select>}
+          <button className="save inline" onClick={doSearch} disabled={loading || !selId}>{loading ? <Spinner label="suche…" /> : '🔎 Suchen'}</button>
+        </div>
+        {q && <p className="hint">{shownItems.length} von {items.length} {appId === 'radarr' ? 'Filmen' : 'Serien'} gefiltert</p>}
+        <div className="search-adv">
+          <span className="qlab">Sortieren:</span><Seg small options={[{ id: 'seeders', label: '⚡ Schnellste (Seeder)' }, { id: 'quality', label: 'Beste Qualität' }]} value={sortBy} onChange={setSortBy} />
+          <label className="chk-row"><input type="checkbox" checked={onlyMatch} onChange={e => setOnlyMatch(e.target.checked)} /> Nur Profil-konforme</label>
+        </div>
+        <div className="batch-bar">
+          <button className="mini-btn accent" onClick={batchSearch} disabled={batch?.running}>{batch?.running ? <Spinner label={`Suche ${batch.done}/${batch.total}…`} /> : '🔍 Alle fehlenden automatisch suchen'}</button>
+          {batch && !batch.running && <span className="status ok">✓ {batch.total} Einträge zur Auto-Suche übergeben</span>}
+        </div>
         {msg && <div className="status info" style={{ marginTop: 10 }}>{msg}</div>}
       </section>
-      {results && results.length > 0 && (
+      {results && visibleResults.length > 0 && (
         <section className="card">
-          <div className="card-head"><span className="emoji">📋</span><h2>{results.length} Treffer</h2></div>
+          <div className="card-head"><span className="emoji">📋</span><h2>{visibleResults.length} Treffer{onlyMatch && results.length !== visibleResults.length ? ` (von ${results.length})` : ''}</h2></div>
           <div className="res-list">
-            {results.slice(0, 50).map((r, i) => {
-              const hdr = detectHDR(r.title); const langs = (r.languages || []).map(l => l.name).filter(n => n && n !== 'Unknown').join(', ')
+            {visibleResults.slice(0, 60).map((r, i) => {
+              const hdr = detectHDR(r.title); const langs = (r.languages || []).map(l => l.name).filter(n => n && n !== 'Unknown').join(', '); const b = relBadge(r)
               return (
                 <div className={'res-row' + (r.rejected ? ' rej' : '')} key={i}>
                   <div className="res-main"><div className="res-title">{r.title}</div>
-                    <div className="res-tags"><span className="tag q">{r.quality?.quality?.name || '?'}</span><span className="tag">{fmtBytes(r.size)}</span><span className={'tag ' + (hdr === 'SDR' ? '' : 'hdr')}>{hdr}</span>{langs && <span className="tag">{langs}</span>}<span className="tag seed">⬆ {r.seeders ?? '?'}</span><span className="tag">{r.indexer}</span>{r.rejected && <span className="tag bad" title={(r.rejections || []).join('; ')}>abgelehnt</span>}</div>
+                    <div className="res-tags"><span className={'res-badge ' + b.cls} title={b.title}>{b.label}</span><span className="tag q">{r.quality?.quality?.name || '?'}</span><span className="tag">{fmtBytes(r.size)}</span><span className={'tag ' + (hdr === 'SDR' ? '' : 'hdr')}>{hdr}</span>{langs && <span className="tag">{langs}</span>}<span className="tag seed">⬆ {r.seeders ?? '?'}</span><span className="tag">{r.indexer}</span></div>
                   </div>
-                  <button className="grab-btn" onClick={() => grab(r)}>⬇ Laden</button>
+                  <button className="grab-btn" onClick={() => grab(r)} disabled={grabbing === r.guid}>{grabbing === r.guid ? <Spinner /> : '⬇ Laden'}</button>
                 </div>
               )
             })}
           </div>
-          <p className="hint">„Schnellste (Seeder)" oben wählen = das mit den meisten Seedern (lädt am schnellsten). „Abgelehnt" kann man trotzdem laden.</p>
+          <p className="hint">⚡ „Schnellste (Seeder)" = das mit den meisten Seedern (lädt am schnellsten). 🟢/🟡/🔴 zeigt, wie gut ein Release zum Profil passt – auch „Passt nicht" lässt sich laden.</p>
         </section>
       )}
+      {results && visibleResults.length === 0 && <section className="card"><p className="hint">Keine Treffer{onlyMatch ? ' (nur Profil-konforme aktiv – Filter abschalten für mehr)' : ''}.</p></section>}
     </div>
   )
 }

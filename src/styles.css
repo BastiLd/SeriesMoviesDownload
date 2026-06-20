@@ -386,3 +386,50 @@ footer b { color: #ffe08a; }
 .cmp-v.diff { color: var(--ink); }
 .cmp-grid > :nth-last-child(-n+3) { border-bottom: 0; }
 @media (max-width: 600px) { .cmp-h:first-child, .cmp-k { font-size: 12px; } .cmp-grid { grid-template-columns: 1fr 1fr 1fr; } }
+
+/* ========== v1.2: Toggles, Spinner, Skeleton, Verbindungs-Warnung, Suche ========== */
+
+/* Sprach-Toggles */
+.lang-toggles { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.toggle-row { display: flex; align-items: flex-start; gap: 11px; width: 100%; text-align: left; background: var(--row-bg); border: 1px solid var(--row-edge); border-radius: 12px; padding: 10px 12px; cursor: pointer; font-family: 'Nunito'; color: var(--ink); transition: .15s; }
+.toggle-row:hover { border-color: var(--teal-2); }
+.toggle-row.on { background: rgba(79,157,105,.1); border-color: var(--green); }
+.toggle-track { flex-shrink: 0; width: 38px; height: 22px; border-radius: 999px; background: var(--seg-bg); border: 1px solid var(--seg-edge); position: relative; transition: .18s; margin-top: 1px; }
+.toggle-row.on .toggle-track { background: var(--green); border-color: transparent; }
+.toggle-knob { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.35); transition: .18s; }
+.toggle-row.on .toggle-knob { transform: translateX(16px); }
+.toggle-label { font-weight: 800; font-size: 13.5px; line-height: 1.3; }
+.toggle-hint { display: block; font-weight: 600; font-size: 12px; color: var(--ink-soft); margin-top: 3px; }
+
+/* Spinner */
+.spinner-wrap { display: inline-flex; align-items: center; gap: 9px; }
+.spinner { width: 16px; height: 16px; border-radius: 50%; border: 2.5px solid var(--seg-edge); border-top-color: var(--teal-2); display: inline-block; animation: spin .7s linear infinite; flex-shrink: 0; }
+.spinner-lbl { font-weight: 700; font-size: 13.5px; color: var(--ink-soft); }
+@keyframes spin { to { transform: rotate(360deg); } }
+.modal-loading { display: flex; align-items: center; justify-content: center; padding: 22px 0; }
+
+/* Skeleton-Loader */
+.skel { border-radius: 10px; background: linear-gradient(90deg, var(--seg-bg) 25%, var(--row-bg) 37%, var(--seg-bg) 63%); background-size: 400% 100%; animation: skel 1.3s ease infinite; }
+.skel-bar { height: 38px; margin-bottom: 14px; }
+.skel-row { height: 52px; margin-bottom: 10px; }
+@keyframes skel { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+
+/* Verbindungs-Warnung */
+.conn-warn { background: rgba(216,161,60,.16); border: 1px solid var(--amber); border-left: 5px solid var(--amber); border-radius: 12px; padding: 11px 14px; font-weight: 800; font-size: 14px; color: var(--ink); margin-bottom: 4px; }
+
+/* Erweiterte Stat-Chips mit Wort */
+.stat-chip.check { color: #5f8fae; border-color: rgba(95,143,174,.45); }
+.stat-chip.paused { color: var(--ink-soft); }
+.dl-row.cat-check { border-left: 3px solid #5f8fae; padding-left: 9px; }
+.dl-row.cat-paused { border-left: 3px solid var(--grey); padding-left: 9px; opacity: .8; }
+
+/* Suchen: Ergebnis-Badges & Steuerung */
+.search-adv { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+.search-adv .filter-search { min-width: 220px; }
+.res-badge { font-size: 12px; font-weight: 800; padding: 3px 10px; border-radius: 999px; border: 1px solid transparent; white-space: nowrap; }
+.res-badge.match { background: rgba(79,157,105,.16); color: var(--green); border-color: rgba(79,157,105,.5); }
+.res-badge.partial { background: rgba(216,161,60,.18); color: var(--amber); border-color: rgba(216,161,60,.5); }
+.res-badge.nomatch { background: rgba(210,96,63,.16); color: #d2603f; border-color: rgba(210,96,63,.5); }
+.batch-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
+.chk-row { display: inline-flex; align-items: center; gap: 7px; font-weight: 700; font-size: 13.5px; color: var(--ink); cursor: pointer; }
+.chk-row input { width: 16px; height: 16px; accent-color: var(--teal-2); cursor: pointer; }

@@ -30,8 +30,8 @@ for (const app of APPS) {
     const original = await loadSettings(app, sel)
     console.log('  ℹ️  Original:', JSON.stringify(original))
 
-    // 4) Testwerte schreiben (erweiterte Optionen)
-    const test = { ...original, codecStates: { x265: 'pref', x264: 'no', av1: 'off' }, remux: true, blacklist: 'YIFY, RARBG, EVO' }
+    // 4) Testwerte schreiben (erweiterte Optionen + Sprachlogik)
+    const test = { ...original, langStates: { ...original.langStates, de: 'required' }, acceptAllLang: true, codecStates: { x265: 'pref', x264: 'no', av1: 'off' }, remux: true, blacklist: 'YIFY, RARBG, EVO' }
     await applySettings(app, sel, test)
 
     // 5) Zuruecklesen + pruefen
@@ -41,8 +41,14 @@ for (const app of APPS) {
     ok('Remux = bevorzugt round-trip', back.remux === true, String(back.remux))
     const bl = back.blacklist.split(',').map(s => s.trim()).filter(Boolean)
     ok('Blacklist round-trip (YIFY/RARBG/EVO)', ['YIFY', 'RARBG', 'EVO'].every(g => bl.includes(g)), back.blacklist)
-    ok('Sprachen unveraendert', eq(back.langStates, original.langStates))
+    ok('Pflicht-Sprache Deutsch round-trip', back.langStates.de === 'required', back.langStates.de)
+    ok('acceptAllLang=AN → keine harte Titel-Sperre (minFormatScore via acceptAllLang)', back.acceptAllLang === true, String(back.acceptAllLang))
     ok('Qualitaet unveraendert', back.minTier === original.minTier && back.maxTier === original.maxTier, `${back.minTier}-${back.maxTier}`)
+
+    // 5b) acceptAllLang AUS → harte Pflicht muss zurueckkommen
+    await applySettings(app, sel, { ...test, acceptAllLang: false })
+    const hard = await loadSettings(app, sel)
+    ok('acceptAllLang=AUS → harte Pflicht aktiv', hard.acceptAllLang === false && hard.langStates.de === 'required', `accAll=${hard.acceptAllLang} de=${hard.langStates.de}`)
 
     // 6) ORIGINAL wiederherstellen + verifizieren
     await applySettings(app, sel, original)

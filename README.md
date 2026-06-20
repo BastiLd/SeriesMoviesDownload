@@ -16,6 +16,13 @@ Eine lokale Web-Oberfläche (Vite + React) zum komfortablen Steuern von **Radarr
 - **„Warum?"-Analyse** bei fehlenden Titeln inkl. Lösungsvorschlag.
 - **Dark/Light Mode**.
 
+### Neu in v1.2
+- **Download-Fortschritt korrekt** (v1.2): echter Fortschritt & Speed direkt aus qBittorrent (`progress`/`dlspeed`); Season-Packs werden nicht mehr als 0%-Phantom-Episoden doppelt gezählt.
+- **Korrektes Status-Mapping** (v1.2): wartende Torrents (queuedDL/stalledDL/metaDL) zählen als „Warteschlange", nicht als „fehlend"; neue Kategorien „Wird geprüft" & „Pausiert".
+- **Sprachlogik** (v1.2): „🌐 Jede Sprache akzeptieren" / „🌍 Sprache im Titel ignorieren" (Standard AN) – Releases werden nach Audio-Track gefiltert, nicht nach Dateiname. Korrigierte Live-Vorschau.
+- **Suchen erweitert** (v1.2): Freitext-Filter der Bibliothek, Profil-Match-Badges (🟢/🟡/🔴), „nur Profil-konforme", Batch-„alle fehlenden automatisch suchen".
+- **UX** (v1.2): Skeleton-Loader, Verbindungs-Warnbanner, Lade-Spinner, Ctrl+R = Refresh.
+
 ## Starten
 ```bash
 npm install
