@@ -7,6 +7,7 @@ import {
   CODEC_REGEX, REMUX_REGEX, blacklistRegex, CODEC_DEFAULT,
 } from './config.js'
 import { api, getProfiles, applySettings, loadSettings } from './arr.js'
+import { seasonOf, mediaTitle, normTitle, classifyState } from './util.js'
 import ThreeBanner from './ThreeBanner.jsx'
 
 const APPS = [
@@ -15,15 +16,29 @@ const APPS = [
 ]
 const appById = id => APPS.find(a => a.id === id)
 
+// qBittorrent-Aktionen (POST, form-encoded) über den /qbt-Proxy
+async function qbt(path, params) {
+  const body = params ? new URLSearchParams(params).toString() : undefined
+  const r = await fetch('/qbt/api/v2' + path, { method: 'POST', headers: body ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}, body })
+  if (!r.ok) throw new Error(r.status + ' ' + (await r.text()))
+  return r.text()
+}
+// Versionsrobust: qBittorrent 5.x nutzt stop/start, 4.x pause/resume – ersten funktionierenden Endpunkt nehmen
+async function qbtTry(paths, params) {
+  let lastErr
+  for (const p of paths) { try { return await qbt(p, params) } catch (e) { lastErr = e } }
+  throw lastErr || new Error('Aktion nicht unterstützt')
+}
+const QBT_PATHS = {
+  pause: ['/torrents/stop', '/torrents/pause'],
+  resume: ['/torrents/start', '/torrents/resume'],
+}
+
 function fmtBytes(b) {
   if (!b || b < 0) return '–'
   const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0
   while (b >= 1024 && i < u.length - 1) { b /= 1024; i++ }
   return b.toFixed(b < 10 && i > 0 ? 1 : 0) + ' ' + u[i]
-}
-function seasonOf(title = '') {
-  const m = title.match(/S(\d{1,2})[. ]?E\d/i) || title.match(/\bS(\d{1,2})\b/i) || title.match(/Season[. ]?(\d{1,2})/i)
-  return m ? parseInt(m[1], 10) : null
 }
 
 // ---------- Download-Status korrekt erkennen ----------
@@ -38,25 +53,6 @@ const CATS = {
 }
 // Reihenfolge für Chips/Icons
 const CAT_ORDER = ['active', 'queue', 'check', 'paused', 'done', 'problem']
-// qBittorrent-States exakt gemäß API-Doku zuordnen
-const DONE_STATES    = ['uploading', 'stalledup', 'queuedup', 'forcedup', 'pausedup', 'completed', 'seeding']
-const QUEUE_STATES   = ['queueddl', 'stalleddl', 'metadl', 'allocating', 'queued', 'delay', 'forceddl']
-const CHECK_STATES   = ['checkingdl', 'checkingup', 'checkingresumedata', 'moving']
-const PAUSED_STATES  = ['pauseddl', 'stoppeddl', 'stopped']
-const PROBLEM_STATES = ['error', 'missingfiles', 'unknown']
-
-// Kernlogik: ein wartender Torrent (queuedDL/stalledDL/metaDL …) ist KEIN Fehler, sondern „Warteschlange".
-function classifyState(state, { speed = 0, prog = 0 } = {}) {
-  const st = String(state || '').toLowerCase()
-  if (prog >= 1) return 'done'
-  if (DONE_STATES.includes(st)) return 'done'
-  if (CHECK_STATES.includes(st)) return 'check'
-  if (PAUSED_STATES.includes(st)) return 'paused'
-  if (PROBLEM_STATES.includes(st)) return 'problem'
-  if (st === 'downloading' || st === 'forceddl') return speed > 0 ? 'active' : 'queue'
-  if (QUEUE_STATES.includes(st) || st.includes('queue') || st.includes('stalled') || st.includes('dl')) return 'queue'
-  return 'queue'
-}
 
 function fmtSpeed(b) { return b > 0 ? fmtBytes(b) + '/s' : '0 B/s' }
 function fmtETA(sec) {
@@ -68,8 +64,6 @@ function fmtETA(sec) {
   return m + 'm'
 }
 function fmtTime(date) { return date ? date.toLocaleTimeString('de-DE') : '—' }
-// Titel normalisieren für Abgleich missing ↔ Torrent
-function normTitle(s = '') { return s.toLowerCase().replace(/[^a-z0-9]+/g, '') }
 
 // ---------- KI (Ollama lokal / Server oder OpenAI-kompatible API) ----------
 const AI_DEFAULT = { provider: 'ollama', model: 'gemma:2b', url: '', key: '', name: 'KI' }
@@ -94,10 +88,11 @@ function AISettings({ onClose }) {
   const [c, setC] = useState(getAI())
   const set = (k, v) => setC(p => ({ ...p, [k]: v }))
   const save = () => { localStorage.setItem('regler-ai', JSON.stringify(c)); onClose() }
+  const ref = useModalA11y(onClose)
   return (
     <div className="overlay" onClick={onClose}>
-      <div className="modal" onClick={e => e.stopPropagation()}>
-        <div className="modal-head"><h3>🧠 KI-Einstellungen</h3><button className="x" onClick={onClose}>✕</button></div>
+      <div className="modal" ref={ref} role="dialog" aria-modal="true" aria-label="KI-Einstellungen" onClick={e => e.stopPropagation()}>
+        <div className="modal-head"><h3>🧠 KI-Einstellungen</h3><button className="x" aria-label="Schließen" onClick={onClose}>✕</button></div>
         <label className="prof-label">Anbieter</label>
         <select className="prof-select" value={c.provider} onChange={e => set('provider', e.target.value)}>
           <option value="ollama">Ollama – lokal (localhost:11434)</option>
@@ -132,7 +127,7 @@ function ToastHost() {
   return (
     <div className="toast-host">
       {items.map(t => (
-        <div key={t.id} className={'toast ' + t.kind} onClick={() => setItems(p => p.filter(x => x.id !== t.id))}>
+        <div key={t.id} role="status" style={{ '--ms': t.ms + 'ms' }} className={'toast ' + t.kind} onClick={() => setItems(p => p.filter(x => x.id !== t.id))}>
           <span className="toast-ico">{t.kind === 'err' ? '⚠️' : t.kind === 'info' ? 'ℹ️' : '✅'}</span>
           <span className="toast-txt">{t.text}</span>
           <span className="toast-x">✕</span>
@@ -142,18 +137,46 @@ function ToastHost() {
   )
 }
 
-function Seg({ options, value, onChange, small }) {
-  return <div className={'seg' + (small ? ' small' : '')}>{options.map(o => <button key={o.id} className={'seg-btn ' + o.id + (value === o.id ? ' on' : '')} onClick={() => onChange(o.id)} title={o.hint || ''}>{o.label}</button>)}</div>
+function Seg({ options, value, onChange, small, label }) {
+  return <div className={'seg' + (small ? ' small' : '')} role="group" aria-label={label || undefined}>{options.map(o => <button type="button" key={o.id} aria-pressed={value === o.id} className={'seg-btn ' + o.id + (value === o.id ? ' on' : '')} onClick={() => onChange(o.id)} title={o.hint || ''}>{o.label}</button>)}</div>
 }
-function Bar({ pct }) { return <div className="bar"><div className="bar-fill" style={{ width: Math.round(pct) + '%' }} /></div> }
+function Bar({ pct, label }) { return <div className="bar" role="progressbar" aria-valuenow={Math.round(pct)} aria-valuemin={0} aria-valuemax={100} aria-label={label || undefined}><div className="bar-fill" style={{ width: Math.round(pct) + '%' }} /></div> }
 function Spinner({ label }) { return <span className="spinner-wrap"><span className="spinner" />{label && <span className="spinner-lbl">{label}</span>}</span> }
+// Aktions-Buttons pro echtem qBittorrent-Torrent (nicht für *arr-Queue-Fallback-Zeilen)
+function RowActions({ r, busyAct, act }) {
+  if (typeof r.key !== 'string' || r.key.startsWith('q')) return null
+  const b = busyAct === r.key
+  return (
+    <div className="row-actions">
+      {r.cat === 'paused' && <button className="act-btn" disabled={b} aria-label="Fortsetzen" title="Fortsetzen" onClick={() => act('resume', r.key, r.label)}>▶️</button>}
+      {r.cat !== 'paused' && r.cat !== 'done' && <button className="act-btn" disabled={b} aria-label="Pausieren" title="Pausieren" onClick={() => act('pause', r.key, r.label)}>⏸️</button>}
+      {(r.cat === 'queue' || r.cat === 'check') && <button className="act-btn" disabled={b} aria-label="Sofort starten" title="Sofort starten (erzwingen)" onClick={() => act('forceStart', r.key, r.label)}>⚡</button>}
+      <button className="act-btn danger" disabled={b} aria-label="Entfernen" title="Entfernen (Dateien bleiben erhalten)" onClick={() => act('delete', r.key, r.label)}>🗑️</button>
+    </div>
+  )
+}
 function Toggle({ on, onChange, label, hint }) {
   return (
-    <button type="button" className={'toggle-row' + (on ? ' on' : '')} onClick={() => onChange(!on)} title={hint || ''}>
+    <button type="button" role="switch" aria-checked={on} aria-label={typeof label === 'string' ? label : undefined} className={'toggle-row' + (on ? ' on' : '')} onClick={() => onChange(!on)} title={hint || ''}>
       <span className="toggle-track"><span className="toggle-knob" /></span>
       <span className="toggle-label">{label}{hint && <span className="toggle-hint">{hint}</span>}</span>
     </button>
   )
+}
+function EmptyState({ emoji, title, sub }) {
+  return <div className="empty-state"><span className="es-emoji">{emoji}</span><div className="es-title">{title}</div>{sub && <div className="es-sub">{sub}</div>}</div>
+}
+// Modal-Zugänglichkeit: Escape schließt, Fokus landet im Dialog und kehrt danach zurück
+function useModalA11y(onClose) {
+  const ref = React.useRef(null)
+  useEffect(() => {
+    const prev = document.activeElement
+    const onKey = e => { if (e.key === 'Escape') { e.stopPropagation(); onClose() } }
+    window.addEventListener('keydown', onKey)
+    ref.current?.querySelector('button, input, select, textarea, [tabindex]')?.focus()
+    return () => { window.removeEventListener('keydown', onKey); try { prev?.focus() } catch {} }
+  }, [])
+  return ref
 }
 
 // ---------- Helfer fuer die Einstellungen ----------
@@ -244,15 +267,21 @@ function usePanelState(app) {
   }, [sel])
 
   const update = (field, value, label) => {
-    setSettings(prev => {
-      setHistory(h => [{ field, label, old: prev[field], value, time: Date.now() }, ...h].slice(0, 25))
-      return { ...prev, [field]: value }
-    })
+    const now = Date.now()
+    setHistory(h => [{ field, label, old: settings[field], value, time: now }, ...h].slice(0, 25))
+    setSettings(prev => ({ ...prev, [field]: value }))
     setLastChange({ field, value, label }); setDirty(true)
   }
   const setLang = (id, st) => update('langStates', { ...settings.langStates, [id]: st }, `${LANGUAGES.find(l => l.id === id).label} → ${STATES.find(x => x.id === st).label}`)
   const setCodec = (id, st) => update('codecStates', { ...settings.codecStates, [id]: st }, `Codec ${CODECS.find(c => c.id === id).label} → ${codecStateLabel(st)}`)
-  const undo = () => setHistory(h => { if (!h.length) return h; const [last, ...rest] = h; setSettings(s => ({ ...s, [last.field]: last.old })); setLastChange(null); setDirty(true); toast(`Rückgängig: ${last.label}`, 'info'); return rest })
+  const undo = () => {
+    if (!history.length) return
+    const [last, ...rest] = history
+    setHistory(rest)
+    setSettings(s => ({ ...s, [last.field]: last.old }))
+    setLastChange(null); setDirty(true)
+    toast(`Rückgängig: ${last.label}`, 'info')
+  }
   const applyField = (field, value, label) => update(field, value, label)
   const importSettings = obj => { setSettings(normalizeSettings(obj)); setDirty(true); setLastChange(null); setHistory([]) }
 
@@ -379,6 +408,7 @@ function ProfileCompare({ a, b }) {
   return (
     <section className="card compare-card">
       <div className="card-head"><span className="emoji">⚖️</span><h2>Profil-Vergleich</h2></div>
+      <div className="cmp-scroll" tabIndex={0} role="region" aria-label="Profil-Vergleich (horizontal scrollbar)">
       <div className="cmp-grid">
         <div className="cmp-h">Einstellung</div>
         <div className="cmp-h">🎬 {a.profName || 'Filme'}</div>
@@ -393,6 +423,7 @@ function ProfileCompare({ a, b }) {
             </React.Fragment>
           )
         })}
+      </div>
       </div>
       <p className="hint">Gelb markierte Zeilen unterscheiden sich zwischen Filme- und Serien-Profil.</p>
     </section>
@@ -487,6 +518,9 @@ function Status() {
   const [lastUpdate, setLastUpdate] = useState(null)
   const [flash, setFlash] = useState(false)
   const [srcErr, setSrcErr] = useState({})   // { radarr/sonarr/qbt: true } bei Verbindungsproblem
+  const [freeSpace, setFreeSpace] = useState(null)
+  const [busyAct, setBusyAct] = useState(null)   // hash der gerade laufenden Aktion
+  const prevDone = React.useRef(null)            // zum Erkennen frisch fertiger Torrents
 
   const load = async () => {
     const errs = {}
@@ -495,16 +529,26 @@ function Status() {
       catch { errs[url.split('/')[1]] = true; return fallback }
     }
     try {
-      const [rq, sq, rm, sm, qbt] = await Promise.all([
+      const [rq, sq, rm, sm, qtors, maind] = await Promise.all([
         getJ('/radarr/api/v3/queue?pageSize=200', RADARR_KEY, { records: [] }),
         getJ('/sonarr/api/v3/queue?pageSize=200', SONARR_KEY, { records: [] }),
         getJ('/radarr/api/v3/wanted/missing?pageSize=500', RADARR_KEY, { records: [], totalRecords: 0 }),
         getJ('/sonarr/api/v3/wanted/missing?pageSize=500&includeSeries=true', SONARR_KEY, { records: [], totalRecords: 0 }),
         getJ('/qbt/api/v2/torrents/info', null, []),
+        getJ('/qbt/api/v2/sync/maindata', null, {}),
       ])
+      const torrents = Array.isArray(qtors) ? qtors : []
+      // frisch fertig gewordene Torrents melden – NUR wenn qBittorrent wirklich erreichbar war,
+      // sonst würde ein kurzer Aussetzer beim nächsten Poll alle fertigen Torrents fälschlich neu melden
+      if (!errs.qbt) {
+        const doneNow = new Set(torrents.filter(t => (t.progress || 0) >= 1).map(t => t.hash))
+        if (prevDone.current) { for (const t of torrents) if ((t.progress || 0) >= 1 && !prevDone.current.has(t.hash)) toast('✅ Fertig: ' + mediaTitle(t.name), 'ok', 6000) }
+        prevDone.current = doneNow
+      }
+      if (maind?.server_state?.free_space_on_disk != null) setFreeSpace(maind.server_state.free_space_on_disk)
       const queue = [...(rq.records || []).map(x => ({ ...x, kind: '🎬', appId: 'radarr' })), ...(sq.records || []).map(x => ({ ...x, kind: '📺', appId: 'sonarr' }))]
       setSrcErr(errs)
-      setD({ queue, torrents: Array.isArray(qbt) ? qbt : [], missR: rm, missS: sm }); setErr(null)
+      setD({ queue, torrents, missR: rm, missS: sm }); setErr(null)
       setLastUpdate(new Date()); setFlash(true); setTimeout(() => setFlash(false), 700)
     } catch (e) { setErr(e.message) }
   }
@@ -515,6 +559,30 @@ function Status() {
     const onKey = e => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'r') { e.preventDefault(); load() } }
     window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey)
   }, [])
+  // „Warum?"-Modal: Escape schließt, Fokus wandert in den Dialog und kehrt danach zurück
+  const modalRef = React.useRef(null)
+  useEffect(() => {
+    if (!modal) return
+    const prev = document.activeElement
+    const onKey = e => { if (e.key === 'Escape') setModal(null) }
+    window.addEventListener('keydown', onKey)
+    modalRef.current?.querySelector('button, input, select, textarea, [tabindex]')?.focus()
+    return () => { window.removeEventListener('keydown', onKey); try { prev?.focus() } catch {} }
+  }, [!!modal])
+  // qBittorrent-Aktion auf einen Torrent (pause/resume/forceStart/delete)
+  const act = async (action, hash, label) => {
+    if (action === 'delete' && !window.confirm(`Torrent „${label}" aus qBittorrent entfernen?\n(Dateien bleiben erhalten – Sonarr/Radarr kann erneut suchen.)`)) return
+    setBusyAct(hash)
+    try {
+      if (action === 'delete') await qbt('/torrents/delete', { hashes: hash, deleteFiles: 'false' })
+      else if (action === 'forceStart') await qbt('/torrents/setForceStart', { hashes: hash, value: 'true' })
+      else await qbtTry(QBT_PATHS[action], { hashes: hash })
+      toast({ pause: '⏸️ Pausiert', resume: '▶️ Fortgesetzt', forceStart: '⚡ Erzwungen gestartet', delete: '🗑️ Entfernt' }[action] || 'OK', 'ok')
+      await load()
+    } catch (e) { toast('Aktion fehlgeschlagen: ' + e.message, 'err', 6000) }
+    setBusyAct(null)
+  }
+  const actAll = async (action) => { setBusyAct('all'); try { await qbtTry(QBT_PATHS[action], { hashes: 'all' }); toast(action === 'pause' ? '⏸️ Alle pausiert' : '▶️ Alle fortgesetzt', 'ok'); await load() } catch (e) { toast('Fehlgeschlagen: ' + e.message, 'err', 6000) } setBusyAct(null) }
 
   const why = async (appId, item, hasTorrent) => {
     const title = item.title || `${item.series?.title} S${String(item.seasonNumber).padStart(2, '0')}E${String(item.episodeNumber).padStart(2, '0')}`
@@ -564,8 +632,10 @@ function Status() {
   const torrentInfos = torrents.map(t => ({ n: normTitle(t.name), s: seasonOf(t.name) }))
   const coveredByTorrent = (title, season) => {
     const want = normTitle(title || '')
-    if (!want || want.length < 4) return false
-    return torrentInfos.some(ti => ti.n.includes(want) && (season == null || ti.s === season || (ti.s == null && /(complete|allseason|stagione|integrale|s00)/i.test(ti.n))))
+    if (!want || want.length < 2) return false
+    // kurze Titel (z. B. „Up", „ER") exakter matchen, lange per Teilstring
+    const nameMatch = want.length < 4 ? (n => n.startsWith(want)) : (n => n.includes(want))
+    return torrentInfos.some(ti => nameMatch(ti.n) && (season == null || ti.s === season || (ti.s == null && /(complete|allseason|stagione|integrale|s00)/i.test(ti.n))))
   }
   // *arr-Queue NUR ergänzen, wenn KEIN Torrent den Eintrag abdeckt – sonst entstehen die 0%-Phantom-Zeilen
   ;(d?.queue || []).forEach(q => {
@@ -575,7 +645,7 @@ function Status() {
     if (titleDup || coveredByTorrent(seriesTitle, season)) return
     const prog = q.size > 0 ? (q.size - (q.sizeleft || 0)) / q.size : 0
     rows.push({
-      key: 'q' + (q.downloadId || q.title), label: (q.kind || '') + ' ' + q.title, prog, speed: 0,
+      key: 'q' + (q.id ?? (q.downloadId || q.title)), label: (q.kind || '') + ' ' + q.title, prog, speed: 0,
       state: q.status || q.trackedDownloadState, size: q.size || 0, sizeleft: q.sizeleft || 0,
       eta: null, seeds: 0, leech: 0, priority: 99999, cat: classifyState(q.status, { prog }),
     })
@@ -604,10 +674,10 @@ function Status() {
     return (FILTER_CATS[filter] || []).includes(r.cat)
   })
 
-  // nach Staffel gruppieren
-  const groups = {}
-  visibleRows.forEach(r => { const s = seasonOf(r.label); const key = s != null ? 'S' + String(s).padStart(2, '0') : 'movies'; (groups[key] ||= { key, label: s != null ? 'Staffel ' + s : '🎬 Filme / Sonstiges', sort: s != null ? s : 999, items: [] }).items.push(r) })
-  const groupList = Object.values(groups).sort((a, b) => a.sort - b.sort)
+  // „Lädt gerade": aktiv ladende + teilweise geladene wartende Torrents (kein Fehler/Prüf/Pause), Suche respektiert
+  const liveRows = rows.filter(r => (r.cat === 'active' || (r.cat === 'queue' && r.prog > 0 && r.prog < 1)) && (!q || r.label.toLowerCase().includes(q)))
+    .sort((a, b) => (b.speed - a.speed) || (b.prog - a.prog))
+
   const gStat = g => {
     const s = g.items.reduce((a, r) => a + (r.size || 0), 0)
     const dn = g.items.reduce((a, r) => a + (r.size || 0) * r.prog, 0)
@@ -615,8 +685,18 @@ function Status() {
     const left = g.items.filter(r => ['active', 'queue', 'check'].includes(r.cat)).reduce((a, r) => a + (r.sizeleft || 0), 0)
     const c = Object.fromEntries(CAT_ORDER.map(x => [x, 0]))
     g.items.forEach(r => c[r.cat]++)
-    return { pct: s > 0 ? dn / s * 100 : 0, speed: spd, eta: spd > 0 ? left / spd : null, c }
+    return { pct: s > 0 ? dn / s * 100 : 0, speed: spd, eta: spd > 0 ? left / spd : null, c, active: c.active > 0 }
   }
+  // nach SERIE / FILM gruppieren (nicht nur nach Staffelnummer – sonst werden verschiedene Serien gemischt!)
+  const groups = {}
+  visibleRows.forEach(r => { const title = mediaTitle(r.label); const key = title.toLowerCase(); (groups[key] ||= { key, label: title, isTv: false, items: [] }); if (seasonOf(r.label) != null) groups[key].isTv = true; groups[key].items.push(r) })
+  const groupList = Object.values(groups).sort((a, b) => {
+    const aa = a.items.some(r => r.cat === 'active'), ba = b.items.some(r => r.cat === 'active')
+    if (aa !== ba) return aa ? -1 : 1
+    const ap = a.items.some(r => r.prog > 0 && r.prog < 1), bp = b.items.some(r => r.prog > 0 && r.prog < 1)
+    if (ap !== bp) return ap ? -1 : 1
+    return a.label.localeCompare(b.label)
+  })
 
   // ----- fehlt: nur WIRKLICH fehlende (kein Torrent in qBittorrent – auf Serie+Staffel-Ebene abgeglichen) -----
   const missRRecords = (d?.missR?.records || []).filter(m => !coveredByTorrent(m.title, null))
@@ -634,8 +714,11 @@ function Status() {
       <div className="status-bar">
         <span className={'live-dot' + (flash ? ' flash' : '')} /> Aktualisierung:
         <Seg small options={REFRESH_OPTS} value={interval} onChange={setIntervalMs} />
-        <button className="mini-btn" onClick={load}>↻ jetzt</button>
-        <span className="last-upd">Zuletzt: {fmtTime(lastUpdate)}</span>
+        <button className="mini-btn" onClick={load} title="Jetzt aktualisieren">↻ jetzt</button>
+        <button className="mini-btn" onClick={() => actAll('pause')} disabled={busyAct === 'all'} title="Alle Torrents pausieren">⏸️ Alle</button>
+        <button className="mini-btn" onClick={() => actAll('resume')} disabled={busyAct === 'all'} title="Alle Torrents fortsetzen">▶️ Alle</button>
+        {freeSpace != null && <span className="disk-free" title="Freier Speicherplatz">💾 {fmtBytes(freeSpace)} frei</span>}
+        <span className={'last-upd' + (flash ? ' fresh' : '')}>Zuletzt: {fmtTime(lastUpdate)}</span>
       </div>
       <div className="filter-bar">
         <div className="filter-btns">{FILTERS.map(f => <button key={f.id} className={'filter-btn' + (filter === f.id ? ' on' : '')} onClick={() => setFilter(f.id)}>{f.label}</button>)}</div>
@@ -652,8 +735,26 @@ function Status() {
         </div>
       )}
       {d && <>
+        {showDownloads && liveRows.length > 0 && <section className="card status-card live-card">
+          <div className="card-head"><span className="emoji">⚡</span><h2>Lädt gerade</h2><span className="grp-count live-count">{liveRows.length}</span><span className="dl-totspeed">↓ {fmtSpeed(totSpeed)}</span></div>
+          <div className="live-list">
+            {liveRows.map(r => {
+              const sNum = seasonOf(r.label)
+              return (
+                <div className={'dl-row live cat-' + r.cat} key={'live' + r.key}>
+                  <div className="dl-top"><span className="dl-name"><span className="dl-ico">{CATS[r.cat].icon}</span>{mediaTitle(r.label)}{sNum != null && <span className="season-chip">S{String(sNum).padStart(2, '0')}</span>}</span><span className="dl-pct">{Math.round(r.prog * 100)}%</span></div>
+                  <Bar pct={r.prog * 100} />
+                  <div className="dl-foot">
+                    <div className="dl-meta"><span className="dl-state">{CATS[r.cat].label}</span>{r.speed > 0 ? ' · ↓ ' + fmtBytes(r.speed) + '/s' : ' · stockt (0 B/s)'}{' · ⏱ ' + fmtETA(r.eta != null && r.eta > 0 ? r.eta : (r.speed > 0 ? r.sizeleft / r.speed : null))}{' · ' + fmtBytes(r.sizeleft) + ' übrig von ' + fmtBytes(r.size)}{r.seeds ? ' · ' + r.seeds + ' Seeds' : ''}</div>
+                    <RowActions r={r} busyAct={busyAct} act={act} />
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </section>}
         {showDownloads && <section className="card status-card">
-          <div className="card-head"><span className="emoji">⬇️</span><h2>Aktive Downloads</h2>
+          <div className="card-head"><span className="emoji">⬇️</span><h2>Alle Downloads <span className="sub-h">nach Serie/Film</span></h2>
             <span className="dl-totspeed">↓ {fmtSpeed(totSpeed)}</span>
           </div>
           <div className="stat-row">
@@ -661,39 +762,48 @@ function Status() {
             {rows.length === 0 && <span className="empty">Gerade läuft kein Download.</span>}
             {totETA != null && <span className="stat-eta">⏱ ETA gesamt: ~{fmtETA(totETA)}</span>}
           </div>
-          {rows.length > 0 && <div className="overall"><div className="overall-top"><b>Gesamt-Fortschritt</b><span className="dl-pct">{Math.round(overall)}%</span></div><Bar pct={overall} /></div>}
+          {rows.length > 0 && <div className="overall"><div className="overall-top"><b>Gesamt-Fortschritt</b><span className="dl-pct">{Math.round(overall)}%</span></div><Bar pct={overall} label="Gesamt-Fortschritt" /></div>}
+          {rows.length === 0 && <EmptyState emoji="🎉" title="Alles ruhig" sub="Gerade lädt nichts – keine Torrents in qBittorrent." />}
           {groupList.length === 0 && rows.length > 0 && <p className="empty">Keine Treffer für diesen Filter/Suche.</p>}
           {groupList.map(g => {
-            const open = !!openG[g.key]
             const st = gStat(g)
+            const open = openG[g.key] !== undefined ? openG[g.key] : st.active   // aktive Gruppen automatisch offen
+            const seasons = [...new Set(g.items.map(r => seasonOf(r.label)).filter(s => s != null))].sort((a, b) => a - b)
             return (
-              <div className="grp" key={g.key}>
-                <button className="grp-head" onClick={() => setOpenG(o => ({ ...o, [g.key]: !o[g.key] }))}>
+              <div className={'grp' + (st.active ? ' has-active' : '') + (open ? ' open' : '')} key={g.key}>
+                <button className="grp-head" onClick={() => setOpenG(o => ({ ...o, [g.key]: !(o[g.key] !== undefined ? o[g.key] : st.active) }))}>
                   <span className="grp-arrow">{open ? '▾' : '▸'}</span>
-                  <span className="grp-label">{g.label}</span>
+                  <span className="grp-label">{g.isTv ? '📺' : '🎬'} {g.label}</span>
                   <span className="grp-count">{g.items.length}</span>
+                  {seasons.length > 0 && <span className="grp-sub">{seasons.length === 1 ? 'Staffel ' + seasons[0] : seasons.length + ' Staffeln'}</span>}
                   <span className="grp-icons">{CAT_ORDER.map(c => st.c[c] ? <span key={c} className="mini-icon">{CATS[c].icon}{st.c[c]}</span> : null)}</span>
                   <span className="grp-bar"><Bar pct={st.pct} /></span>
                   <span className="grp-pct">{Math.round(st.pct)}%</span>
                   <span className="grp-spd">{st.speed > 0 ? '↓ ' + fmtBytes(st.speed) + '/s' : ''}{st.eta != null ? ' · ' + fmtETA(st.eta) : ''}</span>
                 </button>
-                {open && g.items.map(r => (
+                {open && g.items.map(r => {
+                  const sNum = seasonOf(r.label)
+                  return (
                   <div className={'dl-row cat-' + r.cat} key={r.key}>
                     <div className="dl-top">
-                      <span className="dl-name"><span className="dl-ico">{CATS[r.cat].icon}</span>{r.label}</span>
+                      <span className="dl-name"><span className="dl-ico">{CATS[r.cat].icon}</span>{sNum != null && <span className="season-chip">S{String(sNum).padStart(2, '0')}</span>}{r.label}</span>
                       <span className="dl-pct">{Math.round(r.prog * 100)}%</span>
                     </div>
                     <Bar pct={r.prog * 100} />
-                    <div className="dl-meta">
-                      <span className="dl-state">{CATS[r.cat].label}</span>
-                      {r.cat === 'queue' && posByKey[r.key] ? ' · ⏳ Position ' + posByKey[r.key] + ' in Warteschlange' : ''}
-                      {r.speed > 0 ? ' · ↓ ' + fmtBytes(r.speed) + '/s' : ''}
-                      {r.cat === 'active' ? ' · ⏱ ' + fmtETA(r.eta != null ? r.eta : (r.speed > 0 ? r.sizeleft / r.speed : null)) : ''}
-                      {' · ' + fmtBytes(r.sizeleft) + ' übrig von ' + fmtBytes(r.size)}
-                      {(r.cat === 'queue' || r.cat === 'problem') ? ' · ' + r.seeds + ' Seeds / ' + r.leech + ' Peers' : ''}
+                    <div className="dl-foot">
+                      <div className="dl-meta">
+                        <span className="dl-state">{CATS[r.cat].label}</span>
+                        {r.cat === 'queue' && posByKey[r.key] ? ' · ⏳ Pos. ' + posByKey[r.key] : ''}
+                        {r.speed > 0 ? ' · ↓ ' + fmtBytes(r.speed) + '/s' : ''}
+                        {r.cat === 'active' ? ' · ⏱ ' + fmtETA(r.eta != null ? r.eta : (r.speed > 0 ? r.sizeleft / r.speed : null)) : ''}
+                        {' · ' + fmtBytes(r.sizeleft) + ' übrig von ' + fmtBytes(r.size)}
+                        {(r.cat === 'queue' || r.cat === 'problem') ? ' · ' + r.seeds + ' Seeds / ' + r.leech + ' Peers' : ''}
+                      </div>
+                      <RowActions r={r} busyAct={busyAct} act={act} />
                     </div>
                   </div>
-                ))}
+                  )
+                })}
               </div>
             )
           })}
@@ -733,8 +843,8 @@ function Status() {
 
       {modal && (
         <div className="overlay" onClick={() => setModal(null)}>
-          <div className="modal" onClick={e => e.stopPropagation()}>
-            <div className="modal-head"><h3>{modal.title}</h3><button className="x" onClick={() => setModal(null)}>✕</button></div>
+          <div className="modal" ref={modalRef} role="dialog" aria-modal="true" aria-label={'Diagnose: ' + modal.title} onClick={e => e.stopPropagation()}>
+            <div className="modal-head"><h3>{modal.title}</h3><button className="x" aria-label="Schließen" onClick={() => setModal(null)}>✕</button></div>
             {modal.loading ? <div className="modal-loading"><Spinner label="analysiere über alle Indexer … (max. 10s)" /></div> : <>
               {modal.found != null && <p className="modal-stat"><b>{modal.found}</b> Releases gefunden · <b>{modal.accepted}</b> passen zu deiner Regel{modal.maxSeed != null ? ' · max. ' + modal.maxSeed + ' Seeder' : ''}</p>}
               <div className="modal-box why"><b>Warum:</b> {modal.why}</div>
@@ -854,7 +964,7 @@ function SearchTab() {
             {visibleResults.slice(0, 60).map((r, i) => {
               const hdr = detectHDR(r.title); const langs = (r.languages || []).map(l => l.name).filter(n => n && n !== 'Unknown').join(', '); const b = relBadge(r)
               return (
-                <div className={'res-row' + (r.rejected ? ' rej' : '')} key={i}>
+                <div className={'res-row fade-in' + (r.rejected ? ' rej' : '')} style={{ '--i': Math.min(i, 12) }} key={i}>
                   <div className="res-main"><div className="res-title">{r.title}</div>
                     <div className="res-tags"><span className={'res-badge ' + b.cls} title={b.title}>{b.label}</span><span className="tag q">{r.quality?.quality?.name || '?'}</span><span className="tag">{fmtBytes(r.size)}</span><span className={'tag ' + (hdr === 'SDR' ? '' : 'hdr')}>{hdr}</span>{langs && <span className="tag">{langs}</span>}<span className="tag seed">⬆ {r.seeders ?? '?'}</span><span className="tag">{r.indexer}</span></div>
                   </div>
@@ -866,7 +976,7 @@ function SearchTab() {
           <p className="hint">⚡ „Schnellste (Seeder)" = das mit den meisten Seedern (lädt am schnellsten). 🟢/🟡/🔴 zeigt, wie gut ein Release zum Profil passt – auch „Passt nicht" lässt sich laden.</p>
         </section>
       )}
-      {results && visibleResults.length === 0 && <section className="card"><p className="hint">Keine Treffer{onlyMatch ? ' (nur Profil-konforme aktiv – Filter abschalten für mehr)' : ''}.</p></section>}
+      {results && visibleResults.length === 0 && <section className="card"><EmptyState emoji="🔍" title="Keine Treffer" sub={onlyMatch ? 'Nur Profil-konforme aktiv – Filter abschalten für mehr Ergebnisse.' : 'Versuch einen anderen Titel oder die Sortierung „Schnellste".'} /></section>}
     </div>
   )
 }
@@ -884,15 +994,17 @@ export default function App() {
       <nav className="nav">
         <div className="brand"><span className="brand-dot" /> MediaStack&nbsp;<b>Regler</b></div>
         <div className="links">
-          <button className={'tab' + (view === 'settings' ? ' on' : '')} onClick={() => setView('settings')}>🎚️ Einstellungen</button>
-          <button className={'tab' + (view === 'status' ? ' on' : '')} onClick={() => setView('status')}>⬇️ Downloads</button>
-          <button className={'tab' + (view === 'search' ? ' on' : '')} onClick={() => setView('search')}>🔎 Suchen</button>
+          <div className="tablist" role="tablist" aria-label="Ansicht">
+            <button role="tab" aria-selected={view === 'settings'} className={'tab' + (view === 'settings' ? ' on' : '')} onClick={() => setView('settings')}>🎚️ Einstellungen</button>
+            <button role="tab" aria-selected={view === 'status'} className={'tab' + (view === 'status' ? ' on' : '')} onClick={() => setView('status')}>⬇️ Downloads</button>
+            <button role="tab" aria-selected={view === 'search'} className={'tab' + (view === 'search' ? ' on' : '')} onClick={() => setView('search')}>🔎 Suchen</button>
+          </div>
           <div className="menu-wrap" onMouseEnter={() => setMenu(true)} onMouseLeave={() => setMenu(false)}>
-            <button className="menu-btn" onClick={() => setMenu(m => !m)}>Apps ▾</button>
+            <button className="menu-btn" aria-haspopup="true" aria-expanded={menu} onClick={() => setMenu(m => !m)}>Apps ▾</button>
             <div className={'menu' + (menu ? ' open' : '')}>{SERVICES.map(s => <a key={s.label} href={s.url} target="_blank" rel="noreferrer"><span>{s.icon}</span>{s.label}</a>)}</div>
           </div>
-          <button className="theme-btn" onClick={() => setAiOpen(true)} title="KI-Einstellungen">🧠</button>
-          <button className="theme-btn" onClick={() => setDark(d => !d)} title="Dark Mode">{dark ? '☀️' : '🌙'}</button>
+          <button className="theme-btn" onClick={() => setAiOpen(true)} title="KI-Einstellungen" aria-label="KI-Einstellungen öffnen">🧠</button>
+          <button className="theme-btn" onClick={() => setDark(d => !d)} title="Dunkelmodus umschalten" aria-label="Dunkelmodus umschalten" aria-pressed={dark}>{dark ? '☀️' : '🌙'}</button>
         </div>
       </nav>
       <header className="hero">

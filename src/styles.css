@@ -2,6 +2,15 @@
 
 * { box-sizing: border-box; }
 
+/* Einheitlicher Tastatur-Fokus-Ring (outline statt box-shadow → wird nicht von overflow abgeschnitten) */
+:where(button, a, select, input, textarea, [tabindex], summary):focus-visible {
+  outline: 2.5px solid #4fb0a0;
+  outline-offset: 2px;
+  border-radius: 9px;
+}
+.nav :focus-visible { outline-color: #ffe08a; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+
 :root {
   --teal-1: #2f6f6a; --teal-2: #3f8d80;
   --bg-1: #e9f0ec; --bg-2: #f6eed8; --bg-3: #efe2c4;
@@ -433,3 +442,118 @@ footer b { color: #ffe08a; }
 .batch-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
 .chk-row { display: inline-flex; align-items: center; gap: 7px; font-weight: 700; font-size: 13.5px; color: var(--ink); cursor: pointer; }
 .chk-row input { width: 16px; height: 16px; accent-color: var(--teal-2); cursor: pointer; }
+
+/* ========== v1.3: Effekte, Micro-Interactions, Download-Aktionen, Responsive ========== */
+
+/* Karten heben sich leicht beim Hover */
+.card { transition: transform .18s cubic-bezier(.2,.8,.3,1), box-shadow .18s, border-color .18s; }
+.card:hover { transform: translateY(-2px); }
+body.dark .card:hover { box-shadow: 0 16px 40px rgba(0,0,0,.55); }
+
+/* Buttons: taktiles Drücken */
+.tab:active, .save:active, .mini-btn:active, .filter-btn:active, .grab-btn:active, .why-btn:active, .menu-btn:active, .theme-btn:active, .act-btn:active { transform: translateY(0) scale(.96); }
+
+/* Animierter Tab-Unterstrich */
+.tab { position: relative; transition: background .15s, color .15s; }
+.tab::after { content: ''; position: absolute; left: 12px; right: 12px; bottom: 3px; height: 2px; border-radius: 2px; background: #ffe08a; transform: scaleX(0); transform-origin: center; transition: transform .22s cubic-bezier(.2,.8,.3,1); }
+.tab.on::after { transform: scaleX(1); background: var(--teal-1); }
+
+/* Fortschrittsbalken: Shimmer auf aktiven Downloads */
+.bar-fill { position: relative; overflow: hidden; }
+.dl-row.cat-active .bar-fill::after, .live-card .dl-row.cat-active .bar-fill::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(105deg, transparent 30%, rgba(255,255,255,.30) 50%, transparent 70%);
+  transform: translateX(-120%); animation: shimmer 1.8s ease-in-out infinite;
+}
+@keyframes shimmer { to { transform: translateX(220%); } }
+
+/* Aktive Zeilen atmen sanft */
+.dl-row.cat-active { animation: liveglow 2.6s ease-in-out infinite; }
+@keyframes liveglow { 0%,100% { box-shadow: none; } 50% { box-shadow: 0 0 18px rgba(92,181,121,.20); } }
+
+/* „Lädt gerade"-Karte */
+.live-card { border-color: var(--green); }
+body.dark .live-card { box-shadow: 0 12px 34px rgba(92,181,121,.16); }
+.live-card .card-head h2 { color: var(--green); }
+.live-count { background: var(--green); }
+.live-list .dl-row { padding: 13px 0; }
+.live-list .dl-row:first-child { border-top: 0; }
+.sub-h { font-family: 'Nunito'; font-size: 13px; font-weight: 700; color: var(--ink-soft); }
+.tablist { display: flex; gap: 16px; align-items: center; }
+.es-sub { font-size: 13px; color: var(--ink-soft); }
+/* Kontrast im Light-Mode (dark ist bereits AA-konform) */
+body:not(.dark) .season-chip { background: var(--teal-1); }
+body:not(.dark) .grp-sub { color: var(--ink); }
+/* 0%-Balken nicht als gefüllten Nub zeigen – Mindestbreite nur bei aktiven Downloads */
+.bar-fill { min-width: 0; }
+.dl-row.cat-active .bar-fill { min-width: 2px; }
+/* Toast-Timerleiste in Toast-Farbe statt blasser Tinte */
+.toast::after { opacity: .55; }
+.toast.ok::after { background: var(--green); }
+.toast.err::after { background: #d2603f; }
+.toast.info::after { background: var(--teal-2); }
+.disk-free { font-weight: 800; font-size: 13px; color: var(--ink-soft); }
+
+/* Staffel-Chip + Serien-Untertitel */
+.season-chip { display: inline-block; font-size: 11px; font-weight: 800; color: #fff; background: var(--teal-2); border-radius: 6px; padding: 1px 7px; margin-right: 7px; vertical-align: middle; }
+.grp-sub { font-size: 12px; font-weight: 700; color: var(--ink-soft); background: var(--seg-bg); border-radius: 999px; padding: 1px 9px; }
+
+/* Zeilen-Aktionen (pause/resume/force/delete) */
+.dl-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.row-actions { display: flex; gap: 6px; flex-shrink: 0; opacity: .55; transition: opacity .15s; }
+.dl-row:hover .row-actions { opacity: 1; }
+.act-btn { background: var(--seg-bg); border: 1px solid var(--seg-edge); border-radius: 8px; cursor: pointer; font-size: 13px; padding: 4px 9px; line-height: 1; transition: transform .12s, filter .12s, background .12s; }
+.act-btn:hover { filter: brightness(1.08); transform: translateY(-1px); }
+.act-btn.danger:hover { background: rgba(210,96,63,.18); border-color: #d2603f; }
+.act-btn:disabled { opacity: .4; cursor: default; }
+
+/* Gruppen-Pfeil rotiert + Hover-Sweep */
+.grp-arrow { transition: transform .2s ease; display: inline-block; }
+.grp.has-active .grp-head { border-color: rgba(92,181,121,.5); }
+.grp-head:hover { background: linear-gradient(90deg, rgba(110,170,180,.12), transparent); }
+
+/* „Zuletzt aktualisiert" tintet kurz grün */
+.last-upd { transition: color .6s; }
+.last-upd.fresh { color: var(--green); }
+
+/* Gestaffeltes Einblenden von Listen */
+@keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.fade-in { animation: fadeUp .32s cubic-bezier(.2,.8,.3,1) both; animation-delay: calc(var(--i, 0) * 35ms); }
+
+/* Leere Zustände mit schwebendem Emoji */
+.empty-state { text-align: center; padding: 28px 16px; color: var(--ink-soft); }
+.empty-state .es-emoji { font-size: 42px; display: block; margin-bottom: 8px; animation: float 3.2s ease-in-out infinite; }
+.empty-state .es-title { font-family: 'Fredoka'; font-size: 18px; color: var(--ink); margin-bottom: 4px; }
+@keyframes float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+
+/* Toast: Auto-Dismiss-Leiste */
+.toast { position: relative; overflow: hidden; }
+.toast::after { content: ''; position: absolute; left: 0; bottom: 0; height: 3px; background: currentColor; opacity: .35; width: 100%; transform-origin: left; animation: toastbar var(--ms, 4200ms) linear forwards; }
+@keyframes toastbar { to { transform: scaleX(0); } }
+
+/* Profil-Vergleich: horizontal scrollbar auf schmalen Screens */
+.cmp-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 13px; }
+.cmp-scroll .cmp-grid { min-width: 460px; }
+
+/* Responsive: unter 900px Karten stapeln */
+@media (max-width: 900px) {
+  .grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 560px) {
+  .qrow, .lang-row { flex-direction: column; align-items: stretch; gap: 6px; }
+  .qlab { min-width: 0; }
+  .seg.small { transform: none; }
+  .seg { width: 100%; justify-content: space-between; }
+  .seg-btn { flex: 1; padding: 8px 4px; font-size: 12px; }
+  .search-controls { flex-direction: column; align-items: stretch; }
+  .search-controls .seg, .search-controls .prof-select, .save.inline { width: 100%; }
+  .dl-foot { align-items: flex-start; }
+  .row-actions { opacity: 1; }
+}
+
+/* Reduced-Motion: alle Animationen abschalten */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; scroll-behavior: auto !important; }
+  .card:hover { transform: none; }
+  .bar-fill::after, .empty-state .es-emoji, .live-dot, .dl-row.cat-active, .toast::after, .spinner { animation: none !important; }
+}

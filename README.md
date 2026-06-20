@@ -23,6 +23,14 @@ Eine lokale Web-Oberfläche (Vite + React) zum komfortablen Steuern von **Radarr
 - **Suchen erweitert** (v1.2): Freitext-Filter der Bibliothek, Profil-Match-Badges (🟢/🟡/🔴), „nur Profil-konforme", Batch-„alle fehlenden automatisch suchen".
 - **UX** (v1.2): Skeleton-Loader, Verbindungs-Warnbanner, Lade-Spinner, Ctrl+R = Refresh.
 
+### Neu in v1.3
+- **„Lädt gerade"-Sektion** (v1.3): zeigt oben sofort alle aktiv ladenden/teilweise geladenen Torrents mit Live-Balken, Speed & ETA – kein Aufklappen nötig.
+- **Gruppierung nach Serie/Film** (v1.3): Downloads werden nach erkanntem Titel gruppiert (statt nur nach Staffelnummer, was verschiedene Serien vermischte); aktive Gruppen klappen automatisch auf.
+- **Torrent-Steuerung** (v1.3): pro Torrent Pause/Fortsetzen/Sofort-Start/Entfernen + global „Alle pausieren/fortsetzen" (qBittorrent v5 stop/start, v4-Fallback).
+- **Mehr Status** (v1.3): freier Speicherplatz, Benachrichtigung bei fertigem Download.
+- **Effekte** (v1.3): Fortschritts-Shimmer, sanftes Leuchten aktiver Zeilen, Karten-Hover, animierter Tab-Unterstrich, gestaffeltes Einblenden, schwebende Leerzustände, Toast-Timerleiste.
+- **Barrierefreiheit** (v1.3): Tastatur-Fokusringe, ARIA-Rollen (Switch/Group/Tablist/Dialog), Escape schließt Modals, `prefers-reduced-motion`, responsives Layout <900px.
+
 ## Starten
 ```bash
 npm install
